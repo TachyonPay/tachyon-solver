@@ -14,6 +14,12 @@ type NetworkConfig struct {
 	Explorer      string
 }
 
+// ChainPair represents a source-destination chain pair configuration
+type ChainPair struct {
+	SourceChain NetworkConfig
+	DestChain   NetworkConfig
+}
+
 // Intent represents a bridge intent on-chain
 type Intent struct {
 	IntentID        *big.Int

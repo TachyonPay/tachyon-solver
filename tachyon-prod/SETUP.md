@@ -23,19 +23,41 @@ cp .env.example .env
 Edit `.env`:
 
 ```bash
-PRIVATE_KEY=0x...
-BRIDGE_CONTRACT_HORIZEN_LATEST=0x8d692017aEA872De988AC27FfD6B9Fed3FF0FC13
-BRIDGE_CONTRACT_BASE_LATEST=0xd2C8C5C6DAD1be31077b0EeDEb78fcB62f7e1066
+# Chain Pair Configuration (supports up to 10 pairs)
+PAIR_COUNT=1
 
+# Pair 1: Source and Destination Chain
+PAIR_1_SOURCE_CHAIN=horizen
+PAIR_1_SOURCE_CHAIN_ID=845320009
+PAIR_1_SOURCE_RPC=https://horizen-rpc-testnet.appchain.base.org
+PAIR_1_SOURCE_BRIDGE=0x8d692017aEA872De988AC27FfD6B9Fed3FF0FC13
+PAIR_1_SOURCE_EXPLORER=https://horizen-explorer-testnet.appchain.base.org
+
+PAIR_1_DEST_CHAIN=base
+PAIR_1_DEST_CHAIN_ID=84532
+PAIR_1_DEST_RPC=https://sepolia.base.org
+PAIR_1_DEST_BRIDGE=0xd2C8C5C6DAD1be31077b0EeDEb78fcB62f7e1066
+PAIR_1_DEST_EXPLORER=https://sepolia-explorer.base.org
+
+# Wallet
+PRIVATE_KEY=0x...
+
+# Solver Configuration
 MIN_PROFIT_MARGIN=0.02
 MAX_BID_AMOUNT=1000000000000000000000
 BID_INCREMENT=1000000000000000000
 BALANCE_BUFFER=0.1
 
+# Service Configuration
 SOLVER_PORT=3001
 RELAYER_PORT=3000
 RELAYER_URL=http://localhost:3000
 ```
+
+The solver now supports configuring up to 10 chain pairs. Each pair defines a bidirectional bridge:
+- Intents created on the source chain will be solved on the destination chain
+- The solver monitors both chains and can handle intents in either direction
+- Add more pairs by incrementing PAIR_COUNT and adding PAIR_2_*, PAIR_3_*, etc.
 
 ### Build
 
@@ -202,12 +224,28 @@ make lint               # Run linter
 
 ## Configuration Reference
 
+### Chain Pair Configuration
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| PAIR_COUNT | Number of chain pairs (1-10) | Yes |
+| PAIR_N_SOURCE_CHAIN | Source chain name | Yes |
+| PAIR_N_SOURCE_CHAIN_ID | Source chain ID | Yes |
+| PAIR_N_SOURCE_RPC | Source chain RPC URL | Yes |
+| PAIR_N_SOURCE_BRIDGE | Source bridge contract | Yes |
+| PAIR_N_SOURCE_EXPLORER | Source chain explorer | No |
+| PAIR_N_DEST_CHAIN | Destination chain name | Yes |
+| PAIR_N_DEST_CHAIN_ID | Destination chain ID | Yes |
+| PAIR_N_DEST_RPC | Destination chain RPC URL | Yes |
+| PAIR_N_DEST_BRIDGE | Destination bridge contract | Yes |
+| PAIR_N_DEST_EXPLORER | Destination chain explorer | No |
+
+Replace N with the pair number (1-10).
+
+### Other Configuration
+
 | Variable | Description | Default |
 |----------|-------------|---------|
-| HORIZEN_TESTNET_RPC_URL | Horizen RPC endpoint | Required |
-| BASE_SEPOLIA_RPC_URL | Base RPC endpoint | Required |
-| BRIDGE_CONTRACT_HORIZEN_LATEST | Horizen bridge address | Required |
-| BRIDGE_CONTRACT_BASE_LATEST | Base bridge address | Required |
 | PRIVATE_KEY | Wallet private key | Required |
 | MIN_PROFIT_MARGIN | Minimum profit (0.02 = 2%) | 0.02 |
 | MAX_BID_AMOUNT | Max bid in wei | 1000 ether |

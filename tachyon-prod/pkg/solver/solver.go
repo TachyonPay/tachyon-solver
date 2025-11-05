@@ -41,6 +41,7 @@ type Solver struct {
 	bidWorkerWg        sync.WaitGroup
 	txMutexes          map[string]*sync.Mutex
 	handlingWins       map[string]bool
+	chainPairMap       map[string]string
 }
 
 // NewSolver creates a new solver instance
@@ -66,6 +67,12 @@ func NewSolver(cfg *config.Config) (*Solver, error) {
 		log.WithField("network", networkKey).Info("Blockchain client initialized")
 	}
 
+	chainPairMap := make(map[string]string)
+	for _, pair := range cfg.ChainPairs {
+		chainPairMap[pair.SourceChain.Name] = pair.DestChain.Name
+		chainPairMap[pair.DestChain.Name] = pair.SourceChain.Name
+	}
+
 	solver := &Solver{
 		cfg:                cfg,
 		clients:            clients,
@@ -75,12 +82,18 @@ func NewSolver(cfg *config.Config) (*Solver, error) {
 		bidWorkerPools:     bidWorkerPools,
 		txMutexes:          txMutexes,
 		handlingWins:       make(map[string]bool),
+		chainPairMap:       chainPairMap,
 	}
 
 	for networkKey, workerPool := range bidWorkerPools {
 		solver.bidWorkerWg.Add(1)
 		go solver.bidWorker(networkKey, workerPool)
 	}
+
+	log.WithFields(log.Fields{
+		"pairCount": len(cfg.ChainPairs),
+		"networks":  len(clients),
+	}).Info("Solver initialized with chain pairs")
 
 	return solver, nil
 }
@@ -645,13 +658,15 @@ func (s *Solver) handleAuctionWon(ctx context.Context, networkKey string, intent
 }
 
 // solveIntentOnDestinationChain solves the intent on the destination network.
-// Determines destination chain as the opposite of source and executes solve transaction.
+// Determines destination chain using the chain pair mapping and executes solve transaction.
 func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwork string, intentID *big.Int) {
-	var destNetwork string
-	if sourceNetwork == "horizen" {
-		destNetwork = "base"
-	} else {
-		destNetwork = "horizen"
+	destNetwork, ok := s.chainPairMap[sourceNetwork]
+	if !ok {
+		log.WithFields(log.Fields{
+			"sourceNetwork": sourceNetwork,
+			"intentID":      intentID,
+		}).Error("No destination chain configured for source network")
+		return
 	}
 
 	sourceClient := s.clients[sourceNetwork]

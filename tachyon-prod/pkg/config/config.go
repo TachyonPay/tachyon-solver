@@ -13,8 +13,11 @@ import (
 
 // Config holds all application configuration
 type Config struct {
-	// Network configurations
+	// Network configurations (maintained for backward compatibility)
 	Networks map[string]types.NetworkConfig
+
+	// Chain pairs (new multi-pair support)
+	ChainPairs []types.ChainPair
 
 	// Solver configuration
 	SolverConfig types.SolverConfig
@@ -30,39 +33,65 @@ type Config struct {
 
 // LoadConfig loads configuration from environment variables
 func LoadConfig() (*Config, error) {
-	// Load .env file if it exists
 	godotenv.Load()
 
 	cfg := &Config{
-		Networks: make(map[string]types.NetworkConfig),
+		Networks:   make(map[string]types.NetworkConfig),
+		ChainPairs: []types.ChainPair{},
 	}
 
-	// Load network configurations
-	horizenChainID := big.NewInt(845320009)
-	baseChainID := big.NewInt(84532)
-
-	cfg.Networks["horizen"] = types.NetworkConfig{
-		Name:          "Horizen Testnet",
-		RpcURL:        getEnv("HORIZEN_TESTNET_RPC_URL", "https://horizen-rpc-testnet.appchain.base.org"),
-		ChainID:       horizenChainID,
-		BridgeAddress: getEnv("BRIDGE_CONTRACT_HORIZEN_LATEST", ""),
-		Explorer:      "https://horizen-explorer-testnet.appchain.base.org",
+	pairCountStr := getEnv("PAIR_COUNT", "1")
+	pairCount, err := strconv.Atoi(pairCountStr)
+	if err != nil || pairCount < 1 || pairCount > 10 {
+		return nil, fmt.Errorf("PAIR_COUNT must be between 1 and 10, got: %s", pairCountStr)
 	}
 
-	cfg.Networks["base"] = types.NetworkConfig{
-		Name:          "Base Sepolia",
-		RpcURL:        getEnv("BASE_SEPOLIA_RPC_URL", "https://sepolia.base.org"),
-		ChainID:       baseChainID,
-		BridgeAddress: getEnv("BRIDGE_CONTRACT_BASE_LATEST", ""),
-		Explorer:      "https://sepolia-explorer.base.org",
-	}
+	for i := 1; i <= pairCount; i++ {
+		prefix := fmt.Sprintf("PAIR_%d_", i)
 
-	// Validate critical addresses
-	if !common.IsHexAddress(cfg.Networks["horizen"].BridgeAddress) {
-		return nil, fmt.Errorf("invalid Horizen bridge address: %s", cfg.Networks["horizen"].BridgeAddress)
-	}
-	if !common.IsHexAddress(cfg.Networks["base"].BridgeAddress) {
-		return nil, fmt.Errorf("invalid Base bridge address: %s", cfg.Networks["base"].BridgeAddress)
+		sourceChainID, ok := new(big.Int).SetString(getEnv(prefix+"SOURCE_CHAIN_ID", ""), 10)
+		if !ok {
+			return nil, fmt.Errorf("invalid %sSOURCE_CHAIN_ID", prefix)
+		}
+
+		destChainID, ok := new(big.Int).SetString(getEnv(prefix+"DEST_CHAIN_ID", ""), 10)
+		if !ok {
+			return nil, fmt.Errorf("invalid %sDEST_CHAIN_ID", prefix)
+		}
+
+		sourceBridge := getEnv(prefix+"SOURCE_BRIDGE", "")
+		if !common.IsHexAddress(sourceBridge) {
+			return nil, fmt.Errorf("invalid %sSOURCE_BRIDGE address: %s", prefix, sourceBridge)
+		}
+
+		destBridge := getEnv(prefix+"DEST_BRIDGE", "")
+		if !common.IsHexAddress(destBridge) {
+			return nil, fmt.Errorf("invalid %sDEST_BRIDGE address: %s", prefix, destBridge)
+		}
+
+		sourceChain := types.NetworkConfig{
+			Name:          getEnv(prefix+"SOURCE_CHAIN", ""),
+			RpcURL:        getEnv(prefix+"SOURCE_RPC", ""),
+			ChainID:       sourceChainID,
+			BridgeAddress: sourceBridge,
+			Explorer:      getEnv(prefix+"SOURCE_EXPLORER", ""),
+		}
+
+		destChain := types.NetworkConfig{
+			Name:          getEnv(prefix+"DEST_CHAIN", ""),
+			RpcURL:        getEnv(prefix+"DEST_RPC", ""),
+			ChainID:       destChainID,
+			BridgeAddress: destBridge,
+			Explorer:      getEnv(prefix+"DEST_EXPLORER", ""),
+		}
+
+		cfg.ChainPairs = append(cfg.ChainPairs, types.ChainPair{
+			SourceChain: sourceChain,
+			DestChain:   destChain,
+		})
+
+		cfg.Networks[sourceChain.Name] = sourceChain
+		cfg.Networks[destChain.Name] = destChain
 	}
 
 	// Load solver configuration
