@@ -1,0 +1,187 @@
+package api
+
+import (
+	"net/http"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/zk-tachyon/tachyon-prod/pkg/relayer"
+	"github.com/zk-tachyon/tachyon-prod/pkg/types"
+)
+
+// RelayerAPI handles HTTP requests for the relayer service
+type RelayerAPI struct {
+	relayer *relayer.Relayer
+}
+
+// NewRelayerAPI creates a new relayer API handler
+func NewRelayerAPI(r *relayer.Relayer) *RelayerAPI {
+	return &RelayerAPI{relayer: r}
+}
+
+// RegisterRoutes registers all relayer API routes
+func (api *RelayerAPI) RegisterRoutes(r *gin.Engine) {
+	r.GET("/health", api.HealthCheck)
+	r.POST("/store-recipients", api.StoreRecipients)
+	r.GET("/get-recipients/:intentId", api.GetRecipients)
+	r.GET("/list-stored-intents", api.ListStoredIntents)
+	r.DELETE("/delete-recipients/:intentId", api.DeleteRecipients)
+	r.POST("/verify", api.VerifyIntent)
+	r.POST("/settle", api.SettleIntent)
+}
+
+// HealthCheck returns the health status of the relayer
+func (api *RelayerAPI) HealthCheck(c *gin.Context) {
+	networks := api.relayer.GetNetworks()
+	chainInfo := api.relayer.GetChainInfo()
+
+	c.JSON(http.StatusOK, types.HealthResponse{
+		Status:    "healthy",
+		Service:   "bridge-relayer",
+		Timestamp: time.Now().Format(time.RFC3339),
+		Networks:  networks,
+		ChainInfo: chainInfo,
+	})
+}
+
+// StoreRecipients stores recipient information for an intent
+func (api *RelayerAPI) StoreRecipients(c *gin.Context) {
+	var req types.StoreRecipientsRequest
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Invalid request body",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	err := api.relayer.StoreRecipients(&req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Failed to store recipients",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":  true,
+		"intentId": req.IntentID,
+		"message":  "Recipients stored successfully",
+	})
+}
+
+// GetRecipients retrieves stored recipient information (only for winning solver)
+func (api *RelayerAPI) GetRecipients(c *gin.Context) {
+	intentID := c.Param("intentId")
+
+	// Get the requester's address from header (solver should send this)
+	requesterAddr := c.GetHeader("X-Solver-Address")
+	if requesterAddr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "X-Solver-Address header required",
+		})
+		return
+	}
+
+	info, err := api.relayer.GetRecipientsForWinner(c.Request.Context(), intentID, requesterAddr)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, info)
+}
+
+// ListStoredIntents returns all stored intent IDs
+func (api *RelayerAPI) ListStoredIntents(c *gin.Context) {
+	intents := api.relayer.ListStoredIntents()
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"count":   len(intents),
+		"intents": intents,
+	})
+}
+
+// DeleteRecipients removes stored recipient information
+func (api *RelayerAPI) DeleteRecipients(c *gin.Context) {
+	intentID := c.Param("intentId")
+
+	err := api.relayer.DeleteRecipients(intentID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Recipients deleted successfully",
+	})
+}
+
+// VerifyIntent verifies if an intent has been solved on the destination chain
+func (api *RelayerAPI) VerifyIntent(c *gin.Context) {
+	var req types.VerifyRequest
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Invalid request body",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	solved, err := api.relayer.VerifyIntentSolved(c.Request.Context(), req.Network, req.IntentID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":  true,
+		"intentId": req.IntentID,
+		"network":  req.Network,
+		"solved":   solved,
+	})
+}
+
+// SettleIntent settles an intent with basic verification
+func (api *RelayerAPI) SettleIntent(c *gin.Context) {
+	var req types.SettleRequest
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Invalid request body",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	response, err := api.relayer.SettleIntent(c.Request.Context(), &req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	if !response.Success {
+		c.JSON(http.StatusBadRequest, response)
+		return
+	}
+
+	c.JSON(http.StatusOK, response)
+}
