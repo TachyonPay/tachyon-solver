@@ -67,18 +67,16 @@ func getEnvOrDefault(key, defaultValue string) string {
 }
 
 func main() {
-	fmt.Println("🚀 Starting complete cross-chain bridge flow test (Go implementation)...\n")
+	fmt.Println("Starting complete cross-chain bridge flow test (Go implementation)...\n")
 
 	ctx := context.Background()
 
-	// Load configuration
 	cfg, err := loadConfig()
 	if err != nil {
-		fmt.Printf("❌ Failed to load config: %v\n", err)
+		fmt.Printf("Failed to load config: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Initialize clients
 	clients, err := utils.InitClients(ctx, &utils.TestConfig{
 		HorizenRPC:      cfg.HorizenRPC,
 		BaseRPC:         cfg.BaseRPC,
@@ -90,81 +88,74 @@ func main() {
 		AuctionDuration: cfg.AuctionDuration,
 	})
 	if err != nil {
-		fmt.Printf("❌ Failed to initialize clients: %v\n", err)
+		fmt.Printf("Failed to initialize clients: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("📍 Chain IDs: Horizen=%s, Base=%s\n", clients.HorizenChainID, clients.BaseChainID)
-	fmt.Printf("👛 Wallet Address: %s\n\n", clients.Wallet.Address.Hex())
+	fmt.Printf("Chain IDs: Horizen=%s, Base=%s\n", clients.HorizenChainID, clients.BaseChainID)
+	fmt.Printf("Wallet Address: %s\n\n", clients.Wallet.Address.Hex())
 
-	// Check service health
-	fmt.Println("🏥 Checking service health...")
+	fmt.Println("Checking service health...")
 	if err := checkServiceHealth(cfg.SolverURL); err != nil {
-		fmt.Printf("⚠️  Solver service health check failed: %v\n", err)
+		fmt.Printf("Solver service health check failed: %v\n", err)
 	} else {
-		fmt.Println("✅ Solver service is healthy")
+		fmt.Println("Solver service is healthy")
 	}
 
 	if err := checkServiceHealth(cfg.RelayerURL); err != nil {
-		fmt.Printf("⚠️  Relayer service health check failed: %v\n", err)
+		fmt.Printf("Relayer service health check failed: %v\n", err)
 	} else {
-		fmt.Println("✅ Relayer service is healthy")
+		fmt.Println("Relayer service is healthy")
 	}
 	fmt.Println()
 
-	// Parse ABIs
 	bridgeABI, err := abi.JSON(strings.NewReader(bridgeIntentABI))
 	if err != nil {
-		fmt.Printf("❌ Failed to parse bridge ABI: %v\n", err)
+		fmt.Printf("Failed to parse bridge ABI: %v\n", err)
 		os.Exit(1)
 	}
 
 	erc20ABI, err := abi.JSON(strings.NewReader(mockERC20ABI))
 	if err != nil {
-		fmt.Printf("❌ Failed to parse ERC20 ABI: %v\n", err)
+		fmt.Printf("Failed to parse ERC20 ABI: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Create contract instances
 	bridgeHorizen := bind.NewBoundContract(common.HexToAddress(cfg.BridgeHorizenAddr), bridgeABI, clients.HorizenClient, clients.HorizenClient, clients.HorizenClient)
 	bridgeBase := bind.NewBoundContract(common.HexToAddress(cfg.BridgeBaseAddr), bridgeABI, clients.BaseClient, clients.BaseClient, clients.BaseClient)
 
-	// Get current latest intent ID
 	var latestIntentIDResult []interface{}
 	err = bridgeHorizen.Call(&bind.CallOpts{Context: ctx}, &latestIntentIDResult, "getLatestIntentId")
 	if err != nil {
-		fmt.Printf("❌ Failed to get latest intent ID: %v\n", err)
+		fmt.Printf("Failed to get latest intent ID: %v\n", err)
 		os.Exit(1)
 	}
 	currentLatestIntentID := latestIntentIDResult[0].(*big.Int)
 	targetIntentID := new(big.Int).Add(currentLatestIntentID, big.NewInt(1))
-	fmt.Printf("🎯 Target Intent ID: %s (will be created next)\n\n", targetIntentID)
+	fmt.Printf("Target Intent ID: %s (will be created next)\n\n", targetIntentID)
 
-	// STEP 1: Use existing test tokens from environment
-	fmt.Println("🪙 STEP 1: Using existing test tokens...")
+	fmt.Println("STEP 1: Using existing test tokens...")
 
-	// Use token addresses from environment
 	tokenAAddrStr := os.Getenv("TOKEN_A_HORIZEN")
 	tokenBAddrStr := os.Getenv("TOKEN_B_BASE")
 
 	if tokenAAddrStr == "" {
-		tokenAAddrStr = "0x6d5be3853E3b277f9Cd2de7B911e4318eE78cfCb" // Default from env.example
+		tokenAAddrStr = "0x6d5be3853E3b277f9Cd2de7B911e4318eE78cfCb"
 	}
 	if tokenBAddrStr == "" {
-		tokenBAddrStr = "0xAb50d4703484B4F0079607c873E064b18F49D48e" // Default from env.example
+		tokenBAddrStr = "0xAb50d4703484B4F0079607c873E064b18F49D48e"
 	}
 
 	tokenAAddr := common.HexToAddress(tokenAAddrStr)
 	tokenBAddr := common.HexToAddress(tokenBAddrStr)
 
-	fmt.Printf("✅ TokenA (Horizen): %s\n", tokenAAddr.Hex())
-	fmt.Printf("✅ TokenB (Base): %s\n\n", tokenBAddr.Hex())
+	fmt.Printf("TokenA (Horizen): %s\n", tokenAAddr.Hex())
+	fmt.Printf("TokenB (Base): %s\n\n", tokenBAddr.Hex())
 
 	tokenA := bind.NewBoundContract(tokenAAddr, erc20ABI, clients.HorizenClient, clients.HorizenClient, clients.HorizenClient)
-	_ = tokenA // Used for approvals in Step 2
+	_ = tokenA
 
-	// STEP 1.5: Approve tokens for multiple intent creations
-	fmt.Println("📋 STEP 1.5: Approving tokens for multiple intents...")
+	fmt.Println("STEP 1.5: Approving tokens for multiple intents...")
 
 	numIntents := 5
 	expectedAmountB := utils.ParseEther("95")
@@ -174,20 +165,19 @@ func main() {
 
 	auth, err := utils.GetTransactOpts(ctx, clients.HorizenClient, clients.Wallet, clients.HorizenChainID)
 	if err != nil {
-		fmt.Printf("❌ Failed to create auth: %v\n", err)
+		fmt.Printf("Failed to create auth: %v\n", err)
 		os.Exit(1)
 	}
 
 	approveTx, err := tokenA.Transact(auth, "approve", common.HexToAddress(cfg.BridgeHorizenAddr), totalApproveAmount)
 	if err != nil {
-		fmt.Printf("❌ Failed to approve tokens: %v\n", err)
+		fmt.Printf("Failed to approve tokens: %v\n", err)
 		os.Exit(1)
 	}
 	utils.WaitForTransaction(ctx, clients.HorizenClient, approveTx.Hash(), 2*time.Minute)
-	fmt.Printf("✅ Approved tokens for %d intents\n\n", numIntents)
+	fmt.Printf("Approved tokens for %d intents\n\n", numIntents)
 
-	// STEP 2: Create multiple intents sequentially
-	fmt.Printf("🎯 STEP 2: Creating %d intents sequentially on Horizen Testnet...\n", numIntents)
+	fmt.Printf("STEP 2: Creating %d intents sequentially on Horizen Testnet...\n", numIntents)
 
 	createdIntents := make([]*big.Int, 0, numIntents)
 
@@ -214,14 +204,14 @@ func main() {
 
 		auth, err := utils.GetTransactOpts(ctx, clients.HorizenClient, clients.Wallet, clients.HorizenChainID)
 		if err != nil {
-			fmt.Printf("❌ Failed to get transaction opts for intent %s: %v\n", expectedIntentID, err)
+			fmt.Printf("Failed to get transaction opts for intent %s: %v\n", expectedIntentID, err)
 			continue
 		}
 
 		createIntentTx, err := bridgeHorizen.Transact(auth, "createIntent",
 			tokenAAddr, tokenBAddr, expectedAmountB, expectedAmountB, reward, big.NewInt(cfg.AuctionDuration))
 		if err != nil {
-			fmt.Printf("❌ Failed to create intent %s: %v\n", expectedIntentID, err)
+			fmt.Printf("Failed to create intent %s: %v\n", expectedIntentID, err)
 			continue
 		}
 
@@ -239,84 +229,32 @@ func main() {
 		createdIntents = append(createdIntents, expectedIntentID)
 	}
 
-	fmt.Printf("\n✅ Successfully created %d intents: ", len(createdIntents))
+	fmt.Printf("\nSuccessfully created %d intents: ", len(createdIntents))
 	for _, id := range createdIntents {
 		fmt.Printf("%s ", id)
 	}
 	fmt.Println()
 
-	// STEP 3-6: Let solver handle everything (bidding, auction, deposit, pickup)
-	fmt.Println("\n🤖 STEP 3-6: Waiting for solver to handle complete auction process for all intents...")
-	fmt.Printf("⏳ This includes: bidding, auction finalization, and deposit/pickup for %d intents\n", len(createdIntents))
-	fmt.Printf("⏳ Waiting %d seconds for solver to complete all steps...\n", cfg.AuctionDuration+15)
+	fmt.Println("\nSTEP 3-6: Waiting for solver to handle complete auction process for all intents...")
+	fmt.Printf("This includes: bidding, auction finalization, and deposit/pickup for %d intents\n", len(createdIntents))
+	fmt.Printf("Waiting %d seconds for solver to complete all steps...\n", cfg.AuctionDuration+15)
 	utils.SleepWithProgress(time.Duration(cfg.AuctionDuration+15)*time.Second, "Waiting for solver")
-	fmt.Printf("✅ Solver should have completed bidding, auction, and deposit for %d intents\n", len(createdIntents))
+	fmt.Printf("Solver should have completed bidding, auction, and deposit for %d intents\n", len(createdIntents))
 
 	actualIntentID := createdIntents[0]
 
-	// COMMENTED OUT: Manual bidding, auction, and deposit - let solver handle everything
-	// // STEP 3: Place bid
-	// fmt.Println("\n🏆 STEP 3: Placing bid before auction ends...")
-	// bidAmount := utils.ParseEther("98")
-	// auth, _ = utils.GetTransactOpts(ctx, clients.HorizenClient, clients.Wallet, clients.HorizenChainID)
-	// placeBidTx, err := bridgeHorizen.Transact(auth, "placeBid", actualIntentID, bidAmount)
-	// if err != nil {
-	// 	fmt.Printf("❌ Failed to place bid: %v\n", err)
-	// 	os.Exit(1)
-	// }
-	// utils.WaitForTransaction(ctx, clients.HorizenClient, placeBidTx.Hash(), 2*time.Minute)
-	// fmt.Println("✅ Bid placed successfully")
-
-	// // STEP 4: Wait for auction to end
-	// fmt.Printf("\n⏳ STEP 4: Waiting %d seconds for auction to end...\n", cfg.AuctionDuration+5)
-	// utils.SleepWithProgress(time.Duration(cfg.AuctionDuration+5)*time.Second, "Waiting for auction")
-
-	// // STEP 5: Finalize auction
-	// fmt.Println("\n🔨 STEP 5: Finalizing auction...")
-	// auth, _ = utils.GetTransactOpts(ctx, clients.HorizenClient, clients.Wallet, clients.HorizenChainID)
-	// finalizeTx, err := bridgeHorizen.Transact(auth, "finalizeAuction", actualIntentID)
-	// if err != nil {
-	// 	fmt.Printf("❌ Failed to finalize auction: %v\n", err)
-	// 	os.Exit(1)
-	// }
-	// utils.WaitForTransaction(ctx, clients.HorizenClient, finalizeTx.Hash(), 2*time.Minute)
-	// fmt.Println("✅ Auction finalized")
-
-	// // STEP 6: Deposit and pickup
-	// fmt.Println("\n💰 STEP 6: Depositing and picking up...")
-	// bidAmount := utils.ParseEther("98")
-	// auth, _ = utils.GetTransactOpts(ctx, clients.HorizenClient, clients.Wallet, clients.HorizenChainID)
-	// approveTx, err = tokenA.Transact(auth, "approve", common.HexToAddress(cfg.BridgeHorizenAddr), bidAmount)
-	// if err != nil {
-	// 	fmt.Printf("❌ Failed to approve tokens for deposit: %v\n", err)
-	// 	os.Exit(1)
-	// }
-	// utils.WaitForTransaction(ctx, clients.HorizenClient, approveTx.Hash(), 2*time.Minute)
-	// fmt.Println("✅ Approved tokens for deposit")
-
-	// auth, _ = utils.GetTransactOpts(ctx, clients.HorizenClient, clients.Wallet, clients.HorizenChainID)
-	// depositTx, err := bridgeHorizen.Transact(auth, "depositAndPickup", actualIntentID)
-	// if err != nil {
-	// 	fmt.Printf("❌ Failed to deposit and pickup: %v\n", err)
-	// 	os.Exit(1)
-	// }
-	// utils.WaitForTransaction(ctx, clients.HorizenClient, depositTx.Hash(), 2*time.Minute)
-	// fmt.Println("✅ Deposit completed")
-
-	// STEP 7-9: Wait for solver to handle complete flow (solving + settlement)
-	fmt.Println("\n🤖 STEP 7-9: Waiting for solver to complete the flow...")
-	fmt.Println("⏳ Solver should:")
+	fmt.Println("\nSTEP 7-9: Waiting for solver to complete the flow...")
+	fmt.Println("Solver should:")
 	fmt.Println("   1. Retrieve recipients from relayer (with security validation)")
 	fmt.Println("   2. Solve the intent on Base Sepolia")
 	fmt.Println("   3. Call relayer to settle on Horizen")
 
-	// Poll for solved status on Base
 	maxWaitSolve := 90 * time.Second
 	pollInterval := 5 * time.Second
 	startTime := time.Now()
 	isSolved := false
 
-	fmt.Println("\n🔍 Checking if intent is solved on Base...")
+	fmt.Println("\nChecking if intent is solved on Base...")
 	for time.Since(startTime) < maxWaitSolve {
 		var solvedResult []interface{}
 		err = bridgeBase.Call(&bind.CallOpts{Context: ctx}, &solvedResult, "solvedIntents", actualIntentID)
@@ -324,17 +262,17 @@ func main() {
 			isSolved = solvedResult[0].(bool)
 			if isSolved {
 				elapsed := time.Since(startTime).Round(time.Second)
-				fmt.Printf("✅ Intent solved on Base! (took %v)\n", elapsed)
+				fmt.Printf("Intent solved on Base! (took %v)\n", elapsed)
 				break
 			}
 		}
-		fmt.Printf("⏳ Waiting for solver to solve on Base... (%v elapsed)\n", time.Since(startTime).Round(time.Second))
+		fmt.Printf("Waiting for solver to solve on Base... (%v elapsed)\n", time.Since(startTime).Round(time.Second))
 		time.Sleep(pollInterval)
 	}
 
 	if !isSolved {
-		fmt.Printf("❌ Solver did not solve the intent within %v\n", maxWaitSolve)
-		fmt.Println("⚠️  Possible reasons:")
+		fmt.Printf("Solver did not solve the intent within %v\n", maxWaitSolve)
+		fmt.Println("Possible reasons:")
 		fmt.Println("   - Solver is not running")
 		fmt.Println("   - Solver didn't win the auction")
 		fmt.Println("   - Solver encountered an error retrieving recipients")
@@ -342,18 +280,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Poll for settlement (intent completed on Horizen)
-	fmt.Println("\n🔍 Checking if intent is settled on Horizen...")
+	fmt.Println("\nChecking if intent is settled on Horizen...")
 	maxWaitSettle := 60 * time.Second
 	startTime = time.Now()
 	isCompleted := false
 
 	for time.Since(startTime) < maxWaitSettle {
-		// Parse intent struct to check Completed field
 		var completedResult []interface{}
 		err = bridgeHorizen.Call(&bind.CallOpts{Context: ctx}, &completedResult, "getIntent", actualIntentID)
 		if err == nil && len(completedResult) > 0 {
-			// Intent struct has Completed at index 10 (based on contract ABI)
 			intentStruct := completedResult[0].(struct {
 				IntentId        *big.Int       `json:"intentId"`
 				User            common.Address `json:"user"`
@@ -371,33 +306,30 @@ func main() {
 			isCompleted = intentStruct.Completed
 			if isCompleted {
 				elapsed := time.Since(startTime).Round(time.Second)
-				fmt.Printf("✅ Intent settled on Horizen! (took %v)\n", elapsed)
+				fmt.Printf("Intent settled on Horizen! (took %v)\n", elapsed)
 				break
 			}
 		}
-		fmt.Printf("⏳ Waiting for solver to settle on Horizen... (%v elapsed)\n", time.Since(startTime).Round(time.Second))
+		fmt.Printf("Waiting for solver to settle on Horizen... (%v elapsed)\n", time.Since(startTime).Round(time.Second))
 		time.Sleep(pollInterval)
 	}
 
 	if !isCompleted {
-		fmt.Printf("⚠️  Intent not settled within %v\n", maxWaitSettle)
-		fmt.Println("⚠️  Note: Intent was solved on Base but settlement may still be pending")
+		fmt.Printf("Intent not settled within %v\n", maxWaitSettle)
+		fmt.Println("Note: Intent was solved on Base but settlement may still be pending")
 	} else {
-		fmt.Println("\n✅ Complete solver flow validated successfully!")
-		fmt.Println("   ✓ Solver won the auction")
-		fmt.Println("   ✓ Solver retrieved recipients from relayer (security validated)")
-		fmt.Println("   ✓ Solver solved intent on Base")
-		fmt.Println("   ✓ Solver settled intent on Horizen")
+		fmt.Println("\nComplete solver flow validated successfully!")
+		fmt.Println("   - Solver won the auction")
+		fmt.Println("   - Solver retrieved recipients from relayer (security validated)")
+		fmt.Println("   - Solver solved intent on Base")
+		fmt.Println("   - Solver settled intent on Horizen")
 	}
 
-	fmt.Println("\n🎉 Complete flow test finished successfully!")
-	fmt.Printf("🎯 Final Intent ID used: %s\n", actualIntentID)
+	fmt.Println("\nComplete flow test finished successfully!")
+	fmt.Printf("Final Intent ID used: %s\n", actualIntentID)
 }
 
 func deployMockERC20(ctx context.Context, client *ethclient.Client, wallet *utils.TestWallet, chainID *big.Int, name, symbol string) (common.Address, error) {
-	// Using simplified deployment - in real scenario, you'd use proper bytecode
-	// For testing, assume tokens are already deployed or deploy via existing method
-	// This is a placeholder - actual deployment requires full bytecode
 	_ = ctx
 	_ = client
 	_ = wallet
@@ -405,8 +337,7 @@ func deployMockERC20(ctx context.Context, client *ethclient.Client, wallet *util
 	_ = name
 	_ = symbol
 
-	// Return a dummy address for now - in production, this would deploy the contract
-	fmt.Println("⚠️  Note: Using existing token deployment method from original scripts")
+	fmt.Println("Note: Using existing token deployment method from original scripts")
 	return common.HexToAddress("0x0"), fmt.Errorf("deploy via TypeScript scripts first")
 }
 
@@ -486,6 +417,6 @@ func settleIntent(relayerURL, intentID, network, solverAddress string) error {
 		return fmt.Errorf("settlement failed: %s", response.Error)
 	}
 
-	fmt.Printf("✅ Settlement transaction: %s\n", response.TransactionHash)
+	fmt.Printf("Settlement transaction: %s\n", response.TransactionHash)
 	return nil
 }
