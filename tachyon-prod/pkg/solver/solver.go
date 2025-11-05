@@ -318,7 +318,7 @@ func (s *Solver) pollEvents(networkKey string) {
 	}
 
 	s.mu.Lock()
-	s.lastProcessedBlock[networkKey] = currentBlock
+	s.lastProcessedBlock[networkKey] = new(big.Int).Set(currentBlock)
 	s.mu.Unlock()
 
 	log.WithFields(log.Fields{
@@ -387,8 +387,9 @@ func (s *Solver) processEvents(ctx context.Context, networkKey string) error {
 		go s.handleNewIntent(ctx, networkKey, intentID)
 	}
 
+	// Update last processed block with write lock
 	s.mu.Lock()
-	s.lastProcessedBlock[networkKey] = currentBlock
+	s.lastProcessedBlock[networkKey] = new(big.Int).Set(currentBlock)
 	s.mu.Unlock()
 
 	return nil
@@ -398,14 +399,39 @@ func (s *Solver) processEvents(ctx context.Context, networkKey string) error {
 func (s *Solver) handleNewIntent(ctx context.Context, networkKey string, intentID *big.Int) {
 	client := s.clients[networkKey]
 
+	key := fmt.Sprintf("%s-%s", networkKey, intentID.String())
+
+	s.mu.Lock()
+	if _, exists := s.activeIntents[key]; exists {
+		s.mu.Unlock()
+		log.WithFields(log.Fields{
+			"intentID": intentID,
+			"network":  networkKey,
+		}).Debug("Intent already being processed, skipping duplicate")
+		return
+	}
+	s.activeIntents[key] = &types.IntentStatus{
+		IntentID:    intentID.String(),
+		Network:     networkKey,
+		Status:      "evaluating",
+		LastUpdated: time.Now(),
+	}
+	s.mu.Unlock()
+
 	intent, err := client.GetIntent(ctx, intentID)
 	if err != nil {
 		log.WithError(err).WithField("intentID", intentID).Error("Failed to get intent")
+		s.mu.Lock()
+		delete(s.activeIntents, key)
+		s.mu.Unlock()
 		return
 	}
 
 	if intent.Completed {
 		log.WithField("intentID", intentID).Debug("Intent already completed")
+		s.mu.Lock()
+		delete(s.activeIntents, key)
+		s.mu.Unlock()
 		return
 	}
 
@@ -416,18 +442,16 @@ func (s *Solver) handleNewIntent(ctx context.Context, networkKey string, intentI
 			"amountA":  intent.AmountA,
 			"reward":   intent.Reward,
 		}).Info("Intent not profitable, skipping")
+		s.mu.Lock()
+		delete(s.activeIntents, key)
+		s.mu.Unlock()
 		return
 	}
 
-	key := fmt.Sprintf("%s-%s", networkKey, intentID.String())
 	s.mu.Lock()
-	s.activeIntents[key] = &types.IntentStatus{
-		IntentID:    intentID.String(),
-		Network:     networkKey,
-		Status:      "bidding",
-		OurBid:      bidAmount.String(),
-		LastUpdated: time.Now(),
-	}
+	s.activeIntents[key].Status = "bidding"
+	s.activeIntents[key].OurBid = bidAmount.String()
+	s.activeIntents[key].LastUpdated = time.Now()
 	s.mu.Unlock()
 
 	go s.startBiddingLoop(ctx, networkKey, intentID, bidAmount)
@@ -489,12 +513,13 @@ func (s *Solver) calculateProfitableBid(ctx context.Context, networkKey string, 
 	return true, targetBid
 }
 
-// startBiddingLoop starts the bidding loop for an intent
-func (s *Solver) startBiddingLoop(ctx context.Context, networkKey string, intentID *big.Int, ourBid *big.Int) {
+// startBiddingLoop starts the bidding loop for an intent with competitive re-bidding
+func (s *Solver) startBiddingLoop(ctx context.Context, networkKey string, intentID *big.Int, initialBid *big.Int) {
 	client := s.clients[networkKey]
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
+	currentBid := new(big.Int).Set(initialBid)
 	hasPlacedBid := false
 
 	for {
@@ -569,10 +594,13 @@ func (s *Solver) startBiddingLoop(ctx context.Context, networkKey string, intent
 					}
 				} else {
 					log.WithFields(log.Fields{
-						"intentID": intentID,
-						"winner":   intent.WinningSolver,
-						"ourAddr":  client.GetAddress().Hex(),
-					}).Debug("Auction not won")
+						"intentID":     intentID,
+						"winner":       intent.WinningSolver,
+						"ourAddr":      client.GetAddress().Hex(),
+						"winningBid":   intent.WinningBid.String(),
+						"ourBid":       currentBid.String(),
+						"hasPlacedBid": hasPlacedBid,
+					}).Info("Auction not won")
 				}
 				return
 			}
@@ -583,34 +611,63 @@ func (s *Solver) startBiddingLoop(ctx context.Context, networkKey string, intent
 				continue
 			}
 
-			if !hasPlacedBid && (highestBid.Cmp(big.NewInt(0)) == 0 || ourBid.Cmp(highestBid) > 0) {
+			shouldBid := false
+			isWinning := highestBidder == client.GetAddress()
+
+			if highestBid.Cmp(big.NewInt(0)) == 0 {
+				shouldBid = true
+			} else if !isWinning {
+				newBid := new(big.Int).Add(highestBid, s.cfg.SolverConfig.BidIncrement)
+
+				minBid := new(big.Int).Add(intent.AmountA, intent.Reward)
+				profitMargin := new(big.Float).SetFloat64(s.cfg.SolverConfig.MinProfitMargin)
+				minBidFloat := new(big.Float).SetInt(minBid)
+				marginAmount := new(big.Float).Mul(minBidFloat, profitMargin)
+				minProfitableBidFloat := new(big.Float).Sub(minBidFloat, marginAmount)
+				minProfitableBid, _ := minProfitableBidFloat.Int(nil)
+
+				if newBid.Cmp(minProfitableBid) >= 0 && newBid.Cmp(s.cfg.SolverConfig.MaxBidAmount) <= 0 {
+					currentBid = newBid
+					shouldBid = true
+					log.WithFields(log.Fields{
+						"intentID":      intentID,
+						"newBid":        newBid.String(),
+						"highestBid":    highestBid.String(),
+						"minProfitable": minProfitableBid.String(),
+					}).Info("Calculated competitive counter-bid")
+				} else {
+					log.WithFields(log.Fields{
+						"intentID":      intentID,
+						"wouldBid":      newBid.String(),
+						"highestBid":    highestBid.String(),
+						"minProfitable": minProfitableBid.String(),
+						"reason":        "not profitable or exceeds max",
+					}).Info("Cannot outbid profitably, giving up")
+					return
+				}
+			}
+
+			if shouldBid {
 				select {
 				case s.bidWorkerPools[networkKey] <- bidJob{
 					ctx:        ctx,
 					client:     client,
 					intentID:   intentID,
-					bidAmount:  ourBid,
+					bidAmount:  currentBid,
 					networkKey: networkKey,
 				}:
 					hasPlacedBid = true
 					log.WithFields(log.Fields{
 						"intentID":  intentID,
-						"bidAmount": ourBid.String(),
+						"bidAmount": currentBid.String(),
 						"network":   networkKey,
-					}).Debug("Bid submitted to worker pool")
+					}).Info("Bid submitted to worker pool")
 				case <-time.After(time.Second):
 					log.WithFields(log.Fields{
 						"intentID": intentID,
 						"network":  networkKey,
-					}).Warn("Bid worker pool full, skipping bid")
+					}).Warn("Bid worker pool full, will retry next cycle")
 				}
-			} else if highestBid.Cmp(big.NewInt(0)) > 0 && highestBidder != client.GetAddress() {
-				log.WithFields(log.Fields{
-					"intentID":    intentID,
-					"ourBid":      ourBid,
-					"highestBid":  highestBid,
-					"highestBidder": highestBidder.Hex(),
-				}).Debug("Outbid by another solver")
 			}
 		}
 	}

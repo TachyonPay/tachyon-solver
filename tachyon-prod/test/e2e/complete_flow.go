@@ -55,7 +55,7 @@ func loadConfig() (*TestConfig, error) {
 		PrivateKey:        os.Getenv("PRIVATE_KEY"),
 		SolverURL:         getEnvOrDefault("SOLVER_URL", "http://localhost:3001"),
 		RelayerURL:        getEnvOrDefault("RELAYER_URL", "http://localhost:3000"),
-		AuctionDuration:   20,
+		AuctionDuration:   30,
 	}, nil
 }
 
