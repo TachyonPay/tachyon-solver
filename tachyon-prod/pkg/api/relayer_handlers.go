@@ -27,6 +27,9 @@ func (api *RelayerAPI) RegisterRoutes(r *gin.Engine) {
 	r.DELETE("/delete-recipients/:intentId", api.DeleteRecipients)
 	r.POST("/verify", api.VerifyIntent)
 	r.POST("/settle", api.SettleIntent)
+	r.POST("/register-solver", api.RegisterSolver)
+	r.POST("/get-routes", api.GetRoutes)
+	r.GET("/get-routes", api.GetRoutesQuery)
 }
 
 func (api *RelayerAPI) HealthCheck(c *gin.Context) {
@@ -175,5 +178,64 @@ func (api *RelayerAPI) SettleIntent(c *gin.Context) {
 		return
 	}
 
+	c.JSON(http.StatusOK, response)
+}
+
+func (api *RelayerAPI) RegisterSolver(c *gin.Context) {
+	var req types.RegisterSolverRequest
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "Invalid request body",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	response, err := api.relayer.RegisterSolver(&req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, response)
+		return
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+func (api *RelayerAPI) GetRoutes(c *gin.Context) {
+	var filter types.GetRoutesRequest
+
+	if err := c.ShouldBindJSON(&filter); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "Invalid request body",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	response := api.relayer.GetRoutes(&filter)
+	c.JSON(http.StatusOK, response)
+}
+
+func (api *RelayerAPI) GetRoutesQuery(c *gin.Context) {
+	sourceChain := c.Query("sourceChain")
+	if sourceChain == "" {
+		sourceChain = c.Query("origin")
+	}
+
+	originAsset := c.Query("originAsset")
+	if originAsset == "" {
+		originAsset = c.Query("tokenA")
+	}
+
+	filter := types.GetRoutesRequest{
+		SourceChain: sourceChain,
+		DestChain:   c.Query("destChain"),
+		TokenA:      originAsset,
+		TokenB:      c.Query("tokenB"),
+	}
+
+	response := api.relayer.GetRoutes(&filter)
 	c.JSON(http.StatusOK, response)
 }

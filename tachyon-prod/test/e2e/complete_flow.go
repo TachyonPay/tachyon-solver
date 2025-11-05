@@ -109,6 +109,18 @@ func main() {
 	}
 	fmt.Println()
 
+	fmt.Println("Testing solver registration with relayer...")
+	if err := testSolverRegistration(cfg, clients.Wallet.Address.Hex()); err != nil {
+		fmt.Printf("Warning: Solver registration test failed: %v\n", err)
+	}
+	fmt.Println()
+
+	fmt.Println("Testing route discovery...")
+	if err := testRouteDiscovery(cfg); err != nil {
+		fmt.Printf("Warning: Route discovery test failed: %v\n", err)
+	}
+	fmt.Println()
+
 	bridgeABI, err := abi.JSON(strings.NewReader(bridgeIntentABI))
 	if err != nil {
 		fmt.Printf("Failed to parse bridge ABI: %v\n", err)
@@ -418,5 +430,178 @@ func settleIntent(relayerURL, intentID, network, solverAddress string) error {
 	}
 
 	fmt.Printf("Settlement transaction: %s\n", response.TransactionHash)
+	return nil
+}
+
+func testSolverRegistration(cfg *TestConfig, solverAddress string) error {
+	type Route struct {
+		SourceChain string `json:"sourceChain"`
+		DestChain   string `json:"destChain"`
+		TokenA      string `json:"tokenA"`
+		TokenB      string `json:"tokenB"`
+	}
+
+	type RegisterRequest struct {
+		SolverAddress string  `json:"solverAddress"`
+		Routes        []Route `json:"routes"`
+	}
+
+	type SolverBalance struct {
+		Chain   string `json:"chain"`
+		Token   string `json:"token"`
+		Balance string `json:"balance"`
+	}
+
+	type RegisterResponse struct {
+		Success       bool            `json:"success"`
+		SolverAddress string          `json:"solverAddress"`
+		RoutesCount   int             `json:"routesCount"`
+		Balances      []SolverBalance `json:"balances"`
+		Error         string          `json:"error,omitempty"`
+	}
+
+	tokenAAddr := os.Getenv("TOKEN_A_HORIZEN")
+	tokenBAddr := os.Getenv("TOKEN_B_BASE")
+	if tokenAAddr == "" {
+		tokenAAddr = "0x6d5be3853E3b277f9Cd2de7B911e4318eE78cfCb"
+	}
+	if tokenBAddr == "" {
+		tokenBAddr = "0xAb50d4703484B4F0079607c873E064b18F49D48e"
+	}
+
+	req := RegisterRequest{
+		SolverAddress: solverAddress,
+		Routes: []Route{
+			{
+				SourceChain: "horizen",
+				DestChain:   "base",
+				TokenA:      tokenAAddr,
+				TokenB:      tokenBAddr,
+			},
+		},
+	}
+
+	reqBody, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := http.Post(
+		fmt.Sprintf("%s/register-solver", cfg.RelayerURL),
+		"application/json",
+		bytes.NewBuffer(reqBody),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var response RegisterResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !response.Success {
+		return fmt.Errorf("registration failed: %s", response.Error)
+	}
+
+	fmt.Printf("✓ Solver registered successfully\n")
+	fmt.Printf("  Address: %s\n", response.SolverAddress)
+	fmt.Printf("  Routes: %d\n", response.RoutesCount)
+	fmt.Printf("  Balances checked: %d\n", len(response.Balances))
+
+	for _, balance := range response.Balances {
+		fmt.Printf("    - %s on %s: %s\n", balance.Token[:10]+"...", balance.Chain, balance.Balance)
+	}
+
+	return nil
+}
+
+func testRouteDiscovery(cfg *TestConfig) error {
+	type Route struct {
+		SourceChain string `json:"sourceChain"`
+		DestChain   string `json:"destChain"`
+		TokenA      string `json:"tokenA"`
+		TokenB      string `json:"tokenB"`
+	}
+
+	type SolverBalance struct {
+		Chain   string `json:"chain"`
+		Token   string `json:"token"`
+		Balance string `json:"balance"`
+	}
+
+	type SolverInfo struct {
+		Address      string          `json:"address"`
+		Routes       []Route         `json:"routes"`
+		Balances     []SolverBalance `json:"balances"`
+		RegisteredAt time.Time       `json:"registeredAt"`
+		LastSeen     time.Time       `json:"lastSeen"`
+	}
+
+	type GetRoutesResponse struct {
+		Success bool         `json:"success"`
+		Routes  []Route      `json:"routes"`
+		Solvers []SolverInfo `json:"solvers"`
+		Error   string       `json:"error,omitempty"`
+	}
+
+	fmt.Println("  Testing: Get all routes")
+	resp, err := http.Get(fmt.Sprintf("%s/get-routes", cfg.RelayerURL))
+	if err != nil {
+		return fmt.Errorf("failed to get routes: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var response GetRoutesResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !response.Success {
+		return fmt.Errorf("get routes failed: %s", response.Error)
+	}
+
+	fmt.Printf("  ✓ Found %d unique routes\n", len(response.Routes))
+	fmt.Printf("  ✓ Found %d registered solvers\n", len(response.Solvers))
+
+	for i, route := range response.Routes {
+		fmt.Printf("    Route %d: %s -> %s\n", i+1, route.SourceChain, route.DestChain)
+	}
+
+	fmt.Println("\n  Testing: Filter routes by source chain")
+	resp2, err := http.Get(fmt.Sprintf("%s/get-routes?sourceChain=horizen", cfg.RelayerURL))
+	if err != nil {
+		return fmt.Errorf("failed to filter routes: %w", err)
+	}
+	defer resp2.Body.Close()
+
+	body2, err := io.ReadAll(resp2.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var response2 GetRoutesResponse
+	if err := json.Unmarshal(body2, &response2); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	fmt.Printf("  ✓ Found %d routes from horizen\n", len(response2.Routes))
+
+	if len(response2.Solvers) > 0 {
+		solver := response2.Solvers[0]
+		fmt.Printf("  ✓ Solver %s supports %d routes\n", solver.Address[:10]+"...", len(solver.Routes))
+	}
+
 	return nil
 }

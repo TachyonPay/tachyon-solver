@@ -111,8 +111,79 @@ func (s *Solver) Start() error {
 
 	log.Info("Starting solver...")
 
+	if err := s.RegisterWithRelayer(); err != nil {
+		log.WithError(err).Warn("Failed to register with relayer, will continue without registration")
+	}
+
 	for networkKey := range s.cfg.Networks {
 		go s.pollEvents(networkKey)
+	}
+
+	return nil
+}
+
+// RegisterWithRelayer registers this solver's routes with the relayer
+func (s *Solver) RegisterWithRelayer() error {
+	var solverAddr string
+	for _, client := range s.clients {
+		solverAddr = client.GetAddress().Hex()
+		break
+	}
+
+	routes := []types.Route{}
+	for _, pair := range s.cfg.ChainPairs {
+		route := types.Route{
+			SourceChain: pair.SourceChain.Name,
+			DestChain:   pair.DestChain.Name,
+			TokenA:      "",
+			TokenB:      "",
+		}
+		routes = append(routes, route)
+	}
+
+	req := types.RegisterSolverRequest{
+		SolverAddress: solverAddr,
+		Routes:        routes,
+	}
+
+	reqBody, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("failed to marshal registration request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/register-solver", s.cfg.RelayerURL)
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(reqBody))
+	if err != nil {
+		return fmt.Errorf("failed to send registration request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var response types.RegisterSolverResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !response.Success {
+		return fmt.Errorf("registration failed: %s", response.Error)
+	}
+
+	log.WithFields(log.Fields{
+		"solver":       solverAddr,
+		"routesCount":  response.RoutesCount,
+		"balanceCount": len(response.Balances),
+	}).Info("Successfully registered with relayer")
+
+	for _, balance := range response.Balances {
+		log.WithFields(log.Fields{
+			"chain":   balance.Chain,
+			"token":   balance.Token,
+			"balance": balance.Balance,
+		}).Debug("Token balance checked")
 	}
 
 	return nil
@@ -245,7 +316,10 @@ func (s *Solver) pollEvents(networkKey string) {
 		log.WithError(err).WithField("network", networkKey).Error("Failed to get current block")
 		return
 	}
+
+	s.mu.Lock()
 	s.lastProcessedBlock[networkKey] = currentBlock
+	s.mu.Unlock()
 
 	log.WithFields(log.Fields{
 		"network":     networkKey,
@@ -274,7 +348,10 @@ func (s *Solver) processEvents(ctx context.Context, networkKey string) error {
 		return fmt.Errorf("failed to get current block: %w", err)
 	}
 
+	s.mu.RLock()
 	fromBlock := s.lastProcessedBlock[networkKey]
+	s.mu.RUnlock()
+
 	if fromBlock == nil {
 		fromBlock = currentBlock
 	}
@@ -310,7 +387,9 @@ func (s *Solver) processEvents(ctx context.Context, networkKey string) error {
 		go s.handleNewIntent(ctx, networkKey, intentID)
 	}
 
+	s.mu.Lock()
 	s.lastProcessedBlock[networkKey] = currentBlock
+	s.mu.Unlock()
 
 	return nil
 }

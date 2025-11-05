@@ -130,3 +130,58 @@ type SolverStatusResponse struct {
 	WalletAddress string                     `json:"walletAddress"`
 	Balances      map[string]string          `json:"balances"`
 }
+
+// Route represents a supported trading route between chains
+type Route struct {
+	SourceChain string `json:"sourceChain"`
+	DestChain   string `json:"destChain"`
+	TokenA      string `json:"tokenA"`
+	TokenB      string `json:"tokenB"`
+}
+
+// SolverBalance represents token balance on a specific chain
+type SolverBalance struct {
+	Chain   string `json:"chain"`
+	Token   string `json:"token"`
+	Balance string `json:"balance"`
+}
+
+// RegisterSolverRequest is the request body for solver registration
+type RegisterSolverRequest struct {
+	SolverAddress string  `json:"solverAddress" binding:"required"`
+	Routes        []Route `json:"routes" binding:"required"`
+}
+
+// RegisterSolverResponse is the response from solver registration
+type RegisterSolverResponse struct {
+	Success      bool            `json:"success"`
+	SolverAddress string         `json:"solverAddress"`
+	RoutesCount  int             `json:"routesCount"`
+	Balances     []SolverBalance `json:"balances"`
+	Error        string          `json:"error,omitempty"`
+}
+
+// GetRoutesRequest is the request body for querying routes
+type GetRoutesRequest struct {
+	SourceChain string `json:"sourceChain,omitempty"`
+	DestChain   string `json:"destChain,omitempty"`
+	TokenA      string `json:"tokenA,omitempty"`
+	TokenB      string `json:"tokenB,omitempty"`
+}
+
+// SolverInfo represents information about a registered solver
+type SolverInfo struct {
+	Address      string          `json:"address"`
+	Routes       []Route         `json:"routes"`
+	Balances     []SolverBalance `json:"balances"`
+	RegisteredAt time.Time       `json:"registeredAt"`
+	LastSeen     time.Time       `json:"lastSeen"`
+}
+
+// GetRoutesResponse is the response from get routes endpoint
+type GetRoutesResponse struct {
+	Success bool         `json:"success"`
+	Routes  []Route      `json:"routes"`
+	Solvers []SolverInfo `json:"solvers"`
+	Error   string       `json:"error,omitempty"`
+}

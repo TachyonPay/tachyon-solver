@@ -475,3 +475,26 @@ func (c *Client) getTransactOpts(ctx context.Context) (*bind.TransactOpts, error
 func (c *Client) Close() {
 	c.ethClient.Close()
 }
+
+// GetTokenBalance returns the ERC20 token balance for a given address
+func (c *Client) GetTokenBalance(ctx context.Context, owner, token common.Address) (*big.Int, error) {
+	erc20ABI, err := abi.JSON(strings.NewReader(`[{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]`))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse ERC20 ABI: %w", err)
+	}
+
+	tokenContract := bind.NewBoundContract(token, erc20ABI, c.ethClient, c.ethClient, c.ethClient)
+
+	var result []interface{}
+	err = tokenContract.Call(&bind.CallOpts{Context: ctx}, &result, "balanceOf", owner)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call balanceOf: %w", err)
+	}
+
+	balance, ok := result[0].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("failed to cast balance to *big.Int")
+	}
+
+	return balance, nil
+}

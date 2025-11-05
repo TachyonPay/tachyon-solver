@@ -18,11 +18,12 @@ import (
 
 // Relayer manages cross-chain intent settlement with privacy preservation
 type Relayer struct {
-	cfg            *config.Config
-	clients        map[string]*blockchain.Client
-	recipientStore map[string]*types.RecipientInfo
-	mu             sync.RWMutex
-	txMutexes      map[string]*sync.Mutex
+	cfg              *config.Config
+	clients          map[string]*blockchain.Client
+	recipientStore   map[string]*types.RecipientInfo
+	registeredSolvers map[string]*types.SolverInfo
+	mu               sync.RWMutex
+	txMutexes        map[string]*sync.Mutex
 }
 
 // NewRelayer creates a new relayer instance
@@ -47,10 +48,11 @@ func NewRelayer(cfg *config.Config) (*Relayer, error) {
 	}
 
 	return &Relayer{
-		cfg:            cfg,
-		clients:        clients,
-		recipientStore: make(map[string]*types.RecipientInfo),
-		txMutexes:      txMutexes,
+		cfg:              cfg,
+		clients:          clients,
+		recipientStore:   make(map[string]*types.RecipientInfo),
+		registeredSolvers: make(map[string]*types.SolverInfo),
+		txMutexes:        txMutexes,
 	}, nil
 }
 
@@ -363,6 +365,149 @@ func (r *Relayer) retryTransaction(ctx context.Context, network string, operatio
 	}).Error("Transaction failed after all retries")
 
 	return nil, fmt.Errorf("transaction failed after %d retries: %w", maxRetries, lastErr)
+}
+
+// RegisterSolver registers a solver and checks its token balances on supported chains
+func (r *Relayer) RegisterSolver(req *types.RegisterSolverRequest) (*types.RegisterSolverResponse, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if !common.IsHexAddress(req.SolverAddress) {
+		return &types.RegisterSolverResponse{
+			Success: false,
+			Error:   "invalid solver address",
+		}, fmt.Errorf("invalid solver address: %s", req.SolverAddress)
+	}
+
+	balances := []types.SolverBalance{}
+
+	for _, route := range req.Routes {
+		sourceBalance, err := r.checkTokenBalance(route.SourceChain, req.SolverAddress, route.TokenA)
+		if err != nil {
+			log.WithError(err).WithFields(log.Fields{
+				"solver": req.SolverAddress,
+				"chain":  route.SourceChain,
+				"token":  route.TokenA,
+			}).Warn("Failed to check token balance")
+		} else {
+			balances = append(balances, *sourceBalance)
+		}
+
+		destBalance, err := r.checkTokenBalance(route.DestChain, req.SolverAddress, route.TokenB)
+		if err != nil {
+			log.WithError(err).WithFields(log.Fields{
+				"solver": req.SolverAddress,
+				"chain":  route.DestChain,
+				"token":  route.TokenB,
+			}).Warn("Failed to check token balance")
+		} else {
+			balances = append(balances, *destBalance)
+		}
+	}
+
+	now := time.Now()
+	r.registeredSolvers[req.SolverAddress] = &types.SolverInfo{
+		Address:      req.SolverAddress,
+		Routes:       req.Routes,
+		Balances:     balances,
+		RegisteredAt: now,
+		LastSeen:     now,
+	}
+
+	log.WithFields(log.Fields{
+		"solver":      req.SolverAddress,
+		"routesCount": len(req.Routes),
+		"balances":    len(balances),
+	}).Info("Solver registered successfully")
+
+	return &types.RegisterSolverResponse{
+		Success:      true,
+		SolverAddress: req.SolverAddress,
+		RoutesCount:  len(req.Routes),
+		Balances:     balances,
+	}, nil
+}
+
+// checkTokenBalance checks the token balance of a solver on a specific chain
+func (r *Relayer) checkTokenBalance(chainName, solverAddress, tokenAddress string) (*types.SolverBalance, error) {
+	client, ok := r.clients[chainName]
+	if !ok {
+		return nil, fmt.Errorf("chain %s not found", chainName)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	balance, err := client.GetTokenBalance(ctx, common.HexToAddress(solverAddress), common.HexToAddress(tokenAddress))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get balance: %w", err)
+	}
+
+	return &types.SolverBalance{
+		Chain:   chainName,
+		Token:   tokenAddress,
+		Balance: balance.String(),
+	}, nil
+}
+
+// GetRoutes returns available routes based on filter criteria.
+// Supports flexible querying:
+//   - All routes: no parameters
+//   - All routes from chain: ?sourceChain=horizen or ?origin=horizen
+//   - Routes by origin asset: ?sourceChain=horizen&tokenA=0x...
+//   - Specific route: all parameters provided
+func (r *Relayer) GetRoutes(filter *types.GetRoutesRequest) *types.GetRoutesResponse {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	uniqueRoutes := make(map[string]types.Route)
+	solversWithRoutes := []types.SolverInfo{}
+
+	for _, solverInfo := range r.registeredSolvers {
+		matchedRoutes := []types.Route{}
+
+		for _, route := range solverInfo.Routes {
+			if r.matchesFilter(route, filter) {
+				routeKey := fmt.Sprintf("%s-%s-%s-%s", route.SourceChain, route.DestChain, route.TokenA, route.TokenB)
+				uniqueRoutes[routeKey] = route
+				matchedRoutes = append(matchedRoutes, route)
+			}
+		}
+
+		if len(matchedRoutes) > 0 {
+			solverWithMatchedRoutes := *solverInfo
+			solverWithMatchedRoutes.Routes = matchedRoutes
+			solversWithRoutes = append(solversWithRoutes, solverWithMatchedRoutes)
+		}
+	}
+
+	routes := make([]types.Route, 0, len(uniqueRoutes))
+	for _, route := range uniqueRoutes {
+		routes = append(routes, route)
+	}
+
+	return &types.GetRoutesResponse{
+		Success: true,
+		Routes:  routes,
+		Solvers: solversWithRoutes,
+	}
+}
+
+// matchesFilter checks if a route matches the filter criteria
+func (r *Relayer) matchesFilter(route types.Route, filter *types.GetRoutesRequest) bool {
+	if filter.SourceChain != "" && route.SourceChain != filter.SourceChain {
+		return false
+	}
+	if filter.DestChain != "" && route.DestChain != filter.DestChain {
+		return false
+	}
+	if filter.TokenA != "" && route.TokenA != filter.TokenA {
+		return false
+	}
+	if filter.TokenB != "" && route.TokenB != filter.TokenB {
+		return false
+	}
+	return true
 }
 
 func (r *Relayer) GetNetworks() []string {
