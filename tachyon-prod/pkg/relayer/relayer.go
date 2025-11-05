@@ -269,14 +269,50 @@ func (r *Relayer) SettleIntent(ctx context.Context, req *types.SettleRequest) (*
 
 	// Basic verification: Check if intent is solved on destination chain
 	destNetwork := r.getDestinationNetwork(req.Network)
-	solved, err := r.VerifyIntentSolved(ctx, destNetwork, req.Chain2IntentID)
+
+	log.WithFields(log.Fields{
+		"sourceNetwork":  req.Network,
+		"destNetwork":    destNetwork,
+		"chain2IntentID": req.Chain2IntentID,
+	}).Info("Verifying intent on destination chain...")
+
+	// Retry verification with small delays for blockchain propagation
+	var solved bool
+	var err error
+	maxRetries := 3
+	for i := 0; i < maxRetries; i++ {
+		if i > 0 {
+			log.WithFields(log.Fields{
+				"attempt": i + 1,
+				"intentID": req.Chain2IntentID,
+			}).Info("Retrying verification...")
+			time.Sleep(time.Duration(i) * 2 * time.Second) // 2s, 4s delays
+		}
+
+		solved, err = r.VerifyIntentSolved(ctx, destNetwork, req.Chain2IntentID)
+		if err != nil {
+			log.WithError(err).Warn("Verification attempt failed")
+			continue
+		}
+
+		if solved {
+			break
+		}
+	}
+
 	if err != nil {
-		log.WithError(err).Error("Failed to verify intent solved")
+		log.WithError(err).Error("Failed to verify intent solved after retries")
 		return &types.RelayerResponse{
 			Success: false,
 			Error:   fmt.Sprintf("verification failed: %v", err),
 		}, nil
 	}
+
+	log.WithFields(log.Fields{
+		"destNetwork": destNetwork,
+		"intentID":    req.Chain2IntentID,
+		"solved":      solved,
+	}).Info("Verification result")
 
 	if !solved {
 		return &types.RelayerResponse{
@@ -292,7 +328,7 @@ func (r *Relayer) SettleIntent(ctx context.Context, req *types.SettleRequest) (*
 	}).Info("Intent verified, settling...")
 
 	// Settle the intent
-	tx, err := client.SettleIntent(ctx, chain1IntentID, chain2IntentID, solverAddr)
+	tx, err := client.SettleIntent(ctx, chain1IntentID, chain2IntentID)
 	if err != nil {
 		log.WithError(err).Error("Failed to settle intent")
 		return &types.RelayerResponse{

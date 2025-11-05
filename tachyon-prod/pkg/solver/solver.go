@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"sync"
@@ -385,16 +386,19 @@ func (s *Solver) startBiddingLoop(ctx context.Context, networkKey string, intent
 				// Finalize the auction to set the winner (if not already finalized)
 				if intent.WinningSolver == (common.Address{}.Hex()) {
 					log.WithField("intentID", intentID).Info("Finalizing auction...")
-					_, err := client.FinalizeAuction(ctx, intentID)
+					tx, err := client.FinalizeAuction(ctx, intentID)
 					if err != nil {
 						log.WithError(err).Warn("Failed to finalize auction (may already be finalized)")
 						// Don't return - continue to check if we won
 					} else {
-						log.WithField("intentID", intentID).Info("Auction finalized")
+						// Wait for finalization transaction to be confirmed
+						_, err = client.WaitForTransaction(ctx, tx)
+						if err != nil {
+							log.WithError(err).Error("Failed to confirm finalization transaction")
+							return
+						}
+						log.WithField("intentID", intentID).Info("Auction finalized and confirmed")
 					}
-
-					// Wait a moment for the transaction to be mined
-					time.Sleep(2 * time.Second)
 
 					// Re-fetch intent to get the winner
 					intent, err = client.GetIntent(ctx, intentID)
@@ -457,15 +461,50 @@ func (s *Solver) startBiddingLoop(ctx context.Context, networkKey string, intent
 func (s *Solver) handleAuctionWon(ctx context.Context, networkKey string, intentID *big.Int) {
 	client := s.clients[networkKey]
 
+	// Get intent details to know the token and bid amount
+	intent, err := client.GetIntent(ctx, intentID)
+	if err != nil {
+		log.WithError(err).Error("Failed to get intent details")
+		return
+	}
+
 	log.WithFields(log.Fields{
-		"network":  networkKey,
-		"intentID": intentID,
-	}).Info("Won auction, depositing tokens...")
+		"network":    networkKey,
+		"intentID":   intentID,
+		"bidAmount":  intent.WinningBid,
+		"tokenA":     intent.TokenA,
+	}).Info("Won auction, approving tokens for deposit...")
+
+	// Approve tokens for the bridge contract
+	tokenAddr := common.HexToAddress(intent.TokenA)
+	bidAmount := intent.WinningBid
+
+	approveTx, err := client.ApproveToken(ctx, tokenAddr, bidAmount)
+	if err != nil {
+		log.WithError(err).Error("Failed to approve tokens")
+		return
+	}
+
+	// Wait for approval to be confirmed
+	_, err = client.WaitForTransaction(ctx, approveTx)
+	if err != nil {
+		log.WithError(err).Error("Failed to confirm token approval")
+		return
+	}
+
+	log.WithField("intentID", intentID).Info("Tokens approved, depositing...")
 
 	// Deposit tokens
-	_, err := client.DepositAndPickup(ctx, intentID)
+	tx, err := client.DepositAndPickup(ctx, intentID)
 	if err != nil {
 		log.WithError(err).Error("Failed to deposit and pickup")
+		return
+	}
+
+	// Wait for transaction to be confirmed
+	_, err = client.WaitForTransaction(ctx, tx)
+	if err != nil {
+		log.WithError(err).Error("Failed to confirm deposit transaction")
 		return
 	}
 
@@ -494,32 +533,18 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 		destNetwork = "horizen"
 	}
 
-	// Wait for deposit transaction to be confirmed
-	log.WithField("intentID", intentID).Info("Waiting for deposit to be confirmed...")
-	time.Sleep(5 * time.Second)
-
-	// Get recipient information from relayer with retries
-	var recipients []string
-	var amounts []string
-	var err error
-	maxRetries := 5
-	for i := 0; i < maxRetries; i++ {
-		recipients, amounts, err = s.getRecipientsFromRelayer(intentID.String())
-		if err == nil {
-			break
-		}
-		if i < maxRetries-1 {
-			log.WithFields(log.Fields{
-				"intentID": intentID,
-				"attempt":  i + 1,
-				"error":    err.Error(),
-			}).Warn("Failed to get recipients, retrying...")
-			time.Sleep(3 * time.Second)
-		}
+	// Get intent details from source chain
+	sourceClient := s.clients[sourceNetwork]
+	intent, err := sourceClient.GetIntent(ctx, intentID)
+	if err != nil {
+		log.WithError(err).Error("Failed to get intent details from source chain")
+		return
 	}
 
+	// Get recipient information from relayer (deposit is already confirmed)
+	recipients, amounts, err := s.getRecipientsFromRelayer(intentID.String())
 	if err != nil {
-		log.WithError(err).Error("Failed to get recipients from relayer after all retries")
+		log.WithError(err).Error("Failed to get recipients from relayer")
 		return
 	}
 
@@ -531,6 +556,7 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 	// Convert to proper types
 	recipientAddrs := make([]common.Address, len(recipients))
 	amountBigInts := make([]*big.Int, len(amounts))
+	totalAmount := big.NewInt(0)
 	for i, addr := range recipients {
 		recipientAddrs[i] = common.HexToAddress(addr)
 		amt, ok := new(big.Int).SetString(amounts[i], 10)
@@ -539,14 +565,48 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 			return
 		}
 		amountBigInts[i] = amt
+		totalAmount = new(big.Int).Add(totalAmount, amt)
 	}
 
 	destClient := s.clients[destNetwork]
 
-	// Solve intent on destination chain
-	tx, err := destClient.SolveIntentOnChain2(ctx, intentID, recipientAddrs, amountBigInts)
+	// Approve tokenB for the bridge contract on destination chain
+	tokenBAddr := common.HexToAddress(intent.TokenB)
+	log.WithFields(log.Fields{
+		"intentID":    intentID,
+		"tokenB":      intent.TokenB,
+		"totalAmount": totalAmount.String(),
+	}).Info("Approving tokenB for solving on destination chain...")
+
+	approveTx, err := destClient.ApproveToken(ctx, tokenBAddr, totalAmount)
+	if err != nil {
+		log.WithError(err).Error("Failed to approve tokenB")
+		return
+	}
+
+	// Wait for approval to be confirmed
+	_, err = destClient.WaitForTransaction(ctx, approveTx)
+	if err != nil {
+		log.WithError(err).Error("Failed to confirm tokenB approval")
+		return
+	}
+
+	log.WithField("intentID", intentID).Info("TokenB approved, solving intent...")
+
+	// Solve intent on destination chain with all required parameters
+	userAddr := common.HexToAddress(intent.User)
+	expectedAmountB := intent.ExpectedAmountB
+
+	tx, err := destClient.SolveIntentOnChain2(ctx, intentID, userAddr, tokenBAddr, expectedAmountB, recipientAddrs, amountBigInts)
 	if err != nil {
 		log.WithError(err).Error("Failed to solve intent on chain2")
+		return
+	}
+
+	// Wait for solve transaction to be confirmed
+	_, err = destClient.WaitForTransaction(ctx, tx)
+	if err != nil {
+		log.WithError(err).Error("Failed to confirm solve transaction")
 		return
 	}
 
@@ -554,7 +614,7 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 		"intentID":    intentID,
 		"destNetwork": destNetwork,
 		"txHash":      tx.Hash().Hex(),
-	}).Info("Intent solved on destination chain")
+	}).Info("Intent solved on destination chain and confirmed")
 
 	// Call relayer to settle the intent
 	go s.settleIntent(ctx, sourceNetwork, intentID, intentID, destClient.GetAddress())
@@ -635,7 +695,11 @@ func (s *Solver) settleIntent(ctx context.Context, network string, chain1IntentI
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.WithField("status", resp.StatusCode).Error("Settle request failed")
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		log.WithFields(log.Fields{
+			"status":   resp.StatusCode,
+			"response": string(bodyBytes),
+		}).Error("Settle request failed")
 		return
 	}
 
