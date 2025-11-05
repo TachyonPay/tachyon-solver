@@ -14,15 +14,13 @@ import (
 )
 
 func main() {
-	// Initialize logger
 	log.SetFormatter(&log.TextFormatter{
 		FullTimestamp: true,
 	})
 	log.SetLevel(log.InfoLevel)
 
-	log.Info("Starting Tachyon Relayer Service...")
+	log.Info("Starting Tachyon Relayer Service")
 
-	// Load configuration
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		log.WithError(err).Fatal("Failed to load configuration")
@@ -33,7 +31,6 @@ func main() {
 		"port":     cfg.RelayerPort,
 	}).Info("Configuration loaded")
 
-	// Create relayer instance
 	relayerInstance, err := relayer.NewRelayer(cfg)
 	if err != nil {
 		log.WithError(err).Fatal("Failed to create relayer")
@@ -42,11 +39,9 @@ func main() {
 
 	log.Info("Relayer initialized successfully")
 
-	// Setup Gin router
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
 
-	// Add CORS middleware
 	router.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
@@ -60,15 +55,12 @@ func main() {
 		c.Next()
 	})
 
-	// Register API routes
 	relayerAPI := api.NewRelayerAPI(relayerInstance)
 	relayerAPI.RegisterRoutes(router)
 
-	// Setup graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start HTTP server in a goroutine
 	go func() {
 		addr := fmt.Sprintf(":%s", cfg.RelayerPort)
 		log.WithField("address", addr).Info("Starting HTTP server")
@@ -78,9 +70,8 @@ func main() {
 		}
 	}()
 
-	// Wait for shutdown signal
 	<-quit
-	log.Info("Shutting down relayer...")
+	log.Info("Shutting down relayer")
 
 	log.Info("Relayer shutdown complete")
 }

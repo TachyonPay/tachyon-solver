@@ -8,15 +8,25 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	log "github.com/sirupsen/logrus"
 	"github.com/zk-tachyon/tachyon-prod/pkg/blockchain"
 	"github.com/zk-tachyon/tachyon-prod/pkg/config"
 	"github.com/zk-tachyon/tachyon-prod/pkg/types"
 )
+
+type bidJob struct {
+	ctx        context.Context
+	client     *blockchain.Client
+	intentID   *big.Int
+	bidAmount  *big.Int
+	networkKey string
+}
 
 // Solver manages the intent solving process
 type Solver struct {
@@ -27,13 +37,18 @@ type Solver struct {
 	isRunning          bool
 	mu                 sync.RWMutex
 	stopChan           chan struct{}
+	bidWorkerPools     map[string]chan bidJob
+	bidWorkerWg        sync.WaitGroup
+	txMutexes          map[string]*sync.Mutex
+	handlingWins       map[string]bool
 }
 
 // NewSolver creates a new solver instance
 func NewSolver(cfg *config.Config) (*Solver, error) {
 	clients := make(map[string]*blockchain.Client)
+	txMutexes := make(map[string]*sync.Mutex)
+	bidWorkerPools := make(map[string]chan bidJob)
 
-	// Initialize blockchain clients for each network
 	for networkKey, networkCfg := range cfg.Networks {
 		client, err := blockchain.NewClient(
 			networkCfg.RpcURL,
@@ -46,16 +61,28 @@ func NewSolver(cfg *config.Config) (*Solver, error) {
 			return nil, fmt.Errorf("failed to create client for %s: %w", networkKey, err)
 		}
 		clients[networkKey] = client
+		txMutexes[networkKey] = &sync.Mutex{}
+		bidWorkerPools[networkKey] = make(chan bidJob, 50)
 		log.WithField("network", networkKey).Info("Blockchain client initialized")
 	}
 
-	return &Solver{
+	solver := &Solver{
 		cfg:                cfg,
 		clients:            clients,
 		activeIntents:      make(map[string]*types.IntentStatus),
 		lastProcessedBlock: make(map[string]*big.Int),
 		stopChan:           make(chan struct{}),
-	}, nil
+		bidWorkerPools:     bidWorkerPools,
+		txMutexes:          txMutexes,
+		handlingWins:       make(map[string]bool),
+	}
+
+	for networkKey, workerPool := range bidWorkerPools {
+		solver.bidWorkerWg.Add(1)
+		go solver.bidWorker(networkKey, workerPool)
+	}
+
+	return solver, nil
 }
 
 // Start starts the solver event polling
@@ -71,7 +98,6 @@ func (s *Solver) Start() error {
 
 	log.Info("Starting solver...")
 
-	// Start event polling for each network
 	for networkKey := range s.cfg.Networks {
 		go s.pollEvents(networkKey)
 	}
@@ -90,7 +116,51 @@ func (s *Solver) Stop() {
 
 	log.Info("Stopping solver...")
 	close(s.stopChan)
+
+	for networkKey, workerPool := range s.bidWorkerPools {
+		close(workerPool)
+		log.WithField("network", networkKey).Debug("Closed bid worker pool")
+	}
+
 	s.isRunning = false
+
+	go func() {
+		s.bidWorkerWg.Wait()
+		log.Info("All bid workers stopped")
+	}()
+}
+
+func (s *Solver) bidWorker(networkKey string, workerPool chan bidJob) {
+	defer s.bidWorkerWg.Done()
+
+	log.WithField("network", networkKey).Debug("Bid worker started")
+
+	for job := range workerPool {
+		s.txMutexes[job.networkKey].Lock()
+
+		tx, err := s.retryTransaction(job.ctx, job.networkKey, "place-bid", func() (*ethtypes.Transaction, error) {
+			return job.client.PlaceBid(job.ctx, job.intentID, job.bidAmount)
+		})
+
+		s.txMutexes[job.networkKey].Unlock()
+
+		if err != nil {
+			log.WithError(err).WithFields(log.Fields{
+				"intentID": job.intentID,
+				"network":  job.networkKey,
+			}).Error("Failed to place bid after retries")
+			continue
+		}
+
+		log.WithFields(log.Fields{
+			"intentID":  job.intentID,
+			"bidAmount": job.bidAmount.String(),
+			"network":   job.networkKey,
+			"txHash":    tx.Hash().Hex(),
+		}).Info("Bid placed successfully")
+	}
+
+	log.WithField("network", networkKey).Debug("Bid worker stopped")
 }
 
 // IsRunning returns whether the solver is currently running
@@ -138,7 +208,6 @@ func (s *Solver) GetWalletAddress() string {
 func (s *Solver) GetBalances(ctx context.Context) map[string]string {
 	balances := make(map[string]string)
 	for networkKey, client := range s.clients {
-		// For now, get ETH balance (tokenAddress zero address)
 		balance, err := client.GetBalance(ctx, common.Address{})
 		if err != nil {
 			log.WithError(err).WithField("network", networkKey).Error("Failed to get balance")
@@ -158,7 +227,6 @@ func (s *Solver) pollEvents(networkKey string) {
 	client := s.clients[networkKey]
 	ctx := context.Background()
 
-	// Initialize last processed block
 	currentBlock, err := client.GetCurrentBlock(ctx)
 	if err != nil {
 		log.WithError(err).WithField("network", networkKey).Error("Failed to get current block")
@@ -198,12 +266,10 @@ func (s *Solver) processEvents(ctx context.Context, networkKey string) error {
 		fromBlock = currentBlock
 	}
 
-	// Don't process if we're at the same block
 	if fromBlock.Cmp(currentBlock) >= 0 {
 		return nil
 	}
 
-	// Get logs for IntentCreated events
 	logs, err := client.GetLogs(ctx, fromBlock, currentBlock, []string{"IntentCreated"})
 	if err != nil {
 		return fmt.Errorf("failed to get logs: %w", err)
@@ -216,7 +282,6 @@ func (s *Solver) processEvents(ctx context.Context, networkKey string) error {
 		"events":    len(logs),
 	}).Debug("Processed blocks")
 
-	// Process each IntentCreated event
 	for _, eventLog := range logs {
 		intentID, err := client.ParseIntentCreatedEvent(eventLog)
 		if err != nil {
@@ -232,7 +297,6 @@ func (s *Solver) processEvents(ctx context.Context, networkKey string) error {
 		go s.handleNewIntent(ctx, networkKey, intentID)
 	}
 
-	// Update last processed block
 	s.lastProcessedBlock[networkKey] = currentBlock
 
 	return nil
@@ -242,20 +306,17 @@ func (s *Solver) processEvents(ctx context.Context, networkKey string) error {
 func (s *Solver) handleNewIntent(ctx context.Context, networkKey string, intentID *big.Int) {
 	client := s.clients[networkKey]
 
-	// Get intent details
 	intent, err := client.GetIntent(ctx, intentID)
 	if err != nil {
 		log.WithError(err).WithField("intentID", intentID).Error("Failed to get intent")
 		return
 	}
 
-	// Check if intent is still active
 	if intent.Completed {
 		log.WithField("intentID", intentID).Debug("Intent already completed")
 		return
 	}
 
-	// Calculate if this is a profitable intent
 	profitable, bidAmount := s.calculateProfitableBid(ctx, networkKey, intent)
 	if !profitable {
 		log.WithFields(log.Fields{
@@ -266,7 +327,6 @@ func (s *Solver) handleNewIntent(ctx context.Context, networkKey string, intentI
 		return
 	}
 
-	// Track this intent
 	key := fmt.Sprintf("%s-%s", networkKey, intentID.String())
 	s.mu.Lock()
 	s.activeIntents[key] = &types.IntentStatus{
@@ -278,24 +338,20 @@ func (s *Solver) handleNewIntent(ctx context.Context, networkKey string, intentI
 	}
 	s.mu.Unlock()
 
-	// Start bidding process
 	go s.startBiddingLoop(ctx, networkKey, intentID, bidAmount)
 }
 
-// calculateProfitableBid calculates a profitable bid amount
+// calculateProfitableBid calculates a profitable bid amount.
+// minBid = amountA + reward. Profit margin and balance buffer are applied to calculate target bid.
 func (s *Solver) calculateProfitableBid(ctx context.Context, networkKey string, intent *types.Intent) (bool, *big.Int) {
-	// Calculate minimum profitable bid: amountA + reward
 	minBid := new(big.Int).Add(intent.AmountA, intent.Reward)
 
-	// Apply profit margin from config (set MIN_PROFIT_MARGIN=0 in .env to accept all intents)
 	profitMargin := new(big.Float).SetFloat64(s.cfg.SolverConfig.MinProfitMargin)
 	minBidFloat := new(big.Float).SetInt(minBid)
 	marginAmount := new(big.Float).Mul(minBidFloat, profitMargin)
 
-	// Target bid = minBid - margin (we bid less to make profit)
 	targetBidFloat := new(big.Float).Sub(minBidFloat, marginAmount)
 
-	// Subtract 2 tokens to make our bid slightly more competitive
 	twoTokens := new(big.Float).SetInt(new(big.Int).Mul(big.NewInt(2), big.NewInt(1e18)))
 	targetBidFloat = new(big.Float).Sub(targetBidFloat, twoTokens)
 
@@ -307,30 +363,19 @@ func (s *Solver) calculateProfitableBid(ctx context.Context, networkKey string, 
 		"targetBid":    targetBid.String(),
 	}).Debug("Calculated bid amount")
 
-	// Check if we can afford it (check TokenA balance, not ETH)
 	client := s.clients[networkKey]
 	tokenAAddr := common.HexToAddress(intent.TokenA)
-	log.WithFields(log.Fields{
-		"tokenAddress": tokenAAddr.Hex(),
-		"intentID":     intent.IntentID.String(),
-	}).Info("Checking TokenA balance")
 	balance, err := client.GetBalance(ctx, tokenAAddr)
 	if err != nil {
 		log.WithError(err).Error("Failed to get TokenA balance")
 		return false, nil
 	}
-	log.WithFields(log.Fields{
-		"balance":      balance.String(),
-		"tokenAddress": tokenAAddr.Hex(),
-	}).Info("Retrieved TokenA balance")
 
-	// Apply balance buffer
 	bufferFloat := new(big.Float).SetFloat64(1.0 - s.cfg.SolverConfig.BalanceBuffer)
 	balanceFloat := new(big.Float).SetInt(balance)
 	maxAffordable := new(big.Float).Mul(balanceFloat, bufferFloat)
 	maxAffordableInt, _ := maxAffordable.Int(nil)
 
-	// Check affordability
 	if targetBid.Cmp(maxAffordableInt) > 0 {
 		log.WithFields(log.Fields{
 			"targetBid":     targetBid.String(),
@@ -340,7 +385,6 @@ func (s *Solver) calculateProfitableBid(ctx context.Context, networkKey string, 
 		return false, nil
 	}
 
-	// Check against max bid amount
 	if targetBid.Cmp(s.cfg.SolverConfig.MaxBidAmount) > 0 {
 		log.WithFields(log.Fields{
 			"targetBid":    targetBid.String(),
@@ -366,7 +410,6 @@ func (s *Solver) startBiddingLoop(ctx context.Context, networkKey string, intent
 		case <-s.stopChan:
 			return
 		case <-ticker.C:
-			// Check if intent is still active
 			intent, err := client.GetIntent(ctx, intentID)
 			if err != nil {
 				log.WithError(err).Error("Failed to get intent")
@@ -374,78 +417,102 @@ func (s *Solver) startBiddingLoop(ctx context.Context, networkKey string, intent
 			}
 
 			if intent.Completed {
-				log.WithField("intentID", intentID).Info("Intent completed")
+				log.WithField("intentID", intentID).Debug("Intent completed")
 				return
 			}
 
-			// Check if auction has ended
 			currentTime := time.Now().Unix()
 			if big.NewInt(currentTime).Cmp(intent.EndTime) > 0 {
-				log.WithField("intentID", intentID).Info("Auction ended")
+				log.WithField("intentID", intentID).Debug("Auction ended")
 
-				// Finalize the auction to set the winner (if not already finalized)
 				if intent.WinningSolver == (common.Address{}.Hex()) {
-					log.WithField("intentID", intentID).Info("Finalizing auction...")
-					tx, err := client.FinalizeAuction(ctx, intentID)
+					log.WithField("intentID", intentID).Debug("Finalizing auction")
+
+					s.txMutexes[networkKey].Lock()
+
+					tx, err := s.retryTransaction(ctx, networkKey, "finalize-auction", func() (*ethtypes.Transaction, error) {
+						return client.FinalizeAuction(ctx, intentID)
+					})
+
 					if err != nil {
-						log.WithError(err).Warn("Failed to finalize auction (may already be finalized)")
-						// Don't return - continue to check if we won
+						s.txMutexes[networkKey].Unlock()
+						log.WithError(err).Warn("Failed to finalize auction after retries")
+						time.Sleep(2 * time.Second)
 					} else {
-						// Wait for finalization transaction to be confirmed
-						_, err = client.WaitForTransaction(ctx, tx)
-						if err != nil {
-							log.WithError(err).Error("Failed to confirm finalization transaction")
-							return
+						_, waitErr := client.WaitForTransaction(ctx, tx)
+						s.txMutexes[networkKey].Unlock()
+
+						if waitErr != nil {
+							log.WithError(waitErr).Warn("Failed to confirm finalization transaction")
+							time.Sleep(2 * time.Second)
+						} else {
+							log.WithField("intentID", intentID).Debug("Auction finalized and confirmed")
 						}
-						log.WithField("intentID", intentID).Info("Auction finalized and confirmed")
 					}
 
-					// Re-fetch intent to get the winner
 					intent, err = client.GetIntent(ctx, intentID)
 					if err != nil {
-						log.WithError(err).Error("Failed to get intent after finalization")
-						return
+						log.WithError(err).Warn("Failed to get intent after finalization, will retry")
+						time.Sleep(2 * time.Second)
+						continue
 					}
 				}
 
-				// If we won, proceed with deposit and pickup
 				if intent.WinningSolver == client.GetAddress().Hex() {
-					log.WithFields(log.Fields{
-						"intentID": intentID,
-						"winner":   intent.WinningSolver,
-					}).Info("We won the auction!")
-					go s.handleAuctionWon(ctx, networkKey, intentID)
+					key := fmt.Sprintf("%s-%s", networkKey, intentID.String())
+
+					s.mu.Lock()
+					alreadyHandling := s.handlingWins[key]
+					if !alreadyHandling {
+						s.handlingWins[key] = true
+					}
+					s.mu.Unlock()
+
+					if !alreadyHandling {
+						log.WithFields(log.Fields{
+							"intentID": intentID,
+							"winner":   intent.WinningSolver,
+						}).Info("Auction won by solver")
+						go s.handleAuctionWon(ctx, networkKey, intentID)
+					}
 				} else {
 					log.WithFields(log.Fields{
 						"intentID": intentID,
 						"winner":   intent.WinningSolver,
 						"ourAddr":  client.GetAddress().Hex(),
-					}).Info("We did not win the auction")
+					}).Debug("Auction not won")
 				}
 				return
 			}
 
-			// Get current highest bid
 			highestBid, highestBidder, err := client.GetHighestBid(ctx, intentID)
 			if err != nil {
 				log.WithError(err).Error("Failed to get highest bid")
 				continue
 			}
 
-			// If no bids yet or our bid is higher, place our bid
 			if !hasPlacedBid && (highestBid.Cmp(big.NewInt(0)) == 0 || ourBid.Cmp(highestBid) > 0) {
-				_, err := client.PlaceBid(ctx, intentID, ourBid)
-				if err != nil {
-					log.WithError(err).Error("Failed to place bid")
-					continue
+				select {
+				case s.bidWorkerPools[networkKey] <- bidJob{
+					ctx:        ctx,
+					client:     client,
+					intentID:   intentID,
+					bidAmount:  ourBid,
+					networkKey: networkKey,
+				}:
+					hasPlacedBid = true
+					log.WithFields(log.Fields{
+						"intentID":  intentID,
+						"bidAmount": ourBid.String(),
+						"network":   networkKey,
+					}).Debug("Bid submitted to worker pool")
+				case <-time.After(time.Second):
+					log.WithFields(log.Fields{
+						"intentID": intentID,
+						"network":  networkKey,
+					}).Warn("Bid worker pool full, skipping bid")
 				}
-				hasPlacedBid = true
-				log.WithFields(log.Fields{
-					"intentID": intentID,
-					"bidAmount": ourBid,
-				}).Info("Bid placed successfully")
 			} else if highestBid.Cmp(big.NewInt(0)) > 0 && highestBidder != client.GetAddress() {
-				// Someone else has a higher bid
 				log.WithFields(log.Fields{
 					"intentID":    intentID,
 					"ourBid":      ourBid,
@@ -457,11 +524,64 @@ func (s *Solver) startBiddingLoop(ctx context.Context, networkKey string, intent
 	}
 }
 
+// retryTransaction retries a transaction function up to maxRetries times on nonce errors
+func (s *Solver) retryTransaction(ctx context.Context, networkKey string, operation string, txFunc func() (*ethtypes.Transaction, error)) (*ethtypes.Transaction, error) {
+	maxRetries := 10
+	var lastErr error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			backoffDuration := time.Duration(attempt) * 500 * time.Millisecond
+			log.WithFields(log.Fields{
+				"operation": operation,
+				"attempt":   attempt + 1,
+				"backoff":   backoffDuration,
+			}).Warn("Retrying transaction after nonce conflict")
+			time.Sleep(backoffDuration)
+		}
+
+		tx, err := txFunc()
+		if err == nil {
+			if attempt > 0 {
+				log.WithFields(log.Fields{
+					"operation": operation,
+					"attempt":   attempt + 1,
+				}).Info("Transaction succeeded after retry")
+			}
+			return tx, nil
+		}
+
+		lastErr = err
+		errStr := err.Error()
+
+		isNonceError := strings.Contains(errStr, "nonce") ||
+			strings.Contains(errStr, "replacement transaction underpriced") ||
+			strings.Contains(errStr, "already known")
+
+		if !isNonceError {
+			return nil, err
+		}
+
+		log.WithFields(log.Fields{
+			"operation": operation,
+			"attempt":   attempt + 1,
+			"error":     errStr,
+		}).Debug("Nonce conflict detected, will retry")
+	}
+
+	log.WithFields(log.Fields{
+		"operation":   operation,
+		"maxRetries":  maxRetries,
+		"finalError":  lastErr.Error(),
+	}).Error("Transaction failed after all retries")
+
+	return nil, fmt.Errorf("transaction failed after %d retries: %w", maxRetries, lastErr)
+}
+
 // handleAuctionWon handles the case when we win an auction
 func (s *Solver) handleAuctionWon(ctx context.Context, networkKey string, intentID *big.Int) {
 	client := s.clients[networkKey]
 
-	// Get intent details to know the token and bid amount
 	intent, err := client.GetIntent(ctx, intentID)
 	if err != nil {
 		log.WithError(err).Error("Failed to get intent details")
@@ -473,42 +593,44 @@ func (s *Solver) handleAuctionWon(ctx context.Context, networkKey string, intent
 		"intentID":   intentID,
 		"bidAmount":  intent.WinningBid,
 		"tokenA":     intent.TokenA,
-	}).Info("Won auction, approving tokens for deposit...")
+	}).Info("Won auction, approving tokens for deposit")
 
-	// Approve tokens for the bridge contract
 	tokenAddr := common.HexToAddress(intent.TokenA)
 	bidAmount := intent.WinningBid
 
-	approveTx, err := client.ApproveToken(ctx, tokenAddr, bidAmount)
+	s.txMutexes[networkKey].Lock()
+	defer s.txMutexes[networkKey].Unlock()
+
+	approveTx, err := s.retryTransaction(ctx, networkKey, "approve-tokens", func() (*ethtypes.Transaction, error) {
+		return client.ApproveToken(ctx, tokenAddr, bidAmount)
+	})
 	if err != nil {
-		log.WithError(err).Error("Failed to approve tokens")
+		log.WithError(err).Error("Failed to approve tokens after retries")
 		return
 	}
 
-	// Wait for approval to be confirmed
 	_, err = client.WaitForTransaction(ctx, approveTx)
 	if err != nil {
 		log.WithError(err).Error("Failed to confirm token approval")
 		return
 	}
 
-	log.WithField("intentID", intentID).Info("Tokens approved, depositing...")
+	log.WithField("intentID", intentID).Debug("Tokens approved, depositing")
 
-	// Deposit tokens
-	tx, err := client.DepositAndPickup(ctx, intentID)
+	tx, err := s.retryTransaction(ctx, networkKey, "deposit-and-pickup", func() (*ethtypes.Transaction, error) {
+		return client.DepositAndPickup(ctx, intentID)
+	})
 	if err != nil {
-		log.WithError(err).Error("Failed to deposit and pickup")
+		log.WithError(err).Error("Failed to deposit and pickup after retries")
 		return
 	}
 
-	// Wait for transaction to be confirmed
 	_, err = client.WaitForTransaction(ctx, tx)
 	if err != nil {
 		log.WithError(err).Error("Failed to confirm deposit transaction")
 		return
 	}
 
-	// Update intent status
 	key := fmt.Sprintf("%s-%s", networkKey, intentID.String())
 	s.mu.Lock()
 	if status, ok := s.activeIntents[key]; ok {
@@ -519,13 +641,12 @@ func (s *Solver) handleAuctionWon(ctx context.Context, networkKey string, intent
 	}
 	s.mu.Unlock()
 
-	// Now solve the intent on the destination chain
 	go s.solveIntentOnDestinationChain(ctx, networkKey, intentID)
 }
 
-// solveIntentOnDestinationChain solves the intent on the destination network
+// solveIntentOnDestinationChain solves the intent on the destination network.
+// Determines destination chain as the opposite of source and executes solve transaction.
 func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwork string, intentID *big.Int) {
-	// Determine destination network (opposite of source)
 	var destNetwork string
 	if sourceNetwork == "horizen" {
 		destNetwork = "base"
@@ -533,7 +654,6 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 		destNetwork = "horizen"
 	}
 
-	// Get intent details from source chain
 	sourceClient := s.clients[sourceNetwork]
 	intent, err := sourceClient.GetIntent(ctx, intentID)
 	if err != nil {
@@ -541,7 +661,6 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 		return
 	}
 
-	// Get recipient information from relayer (deposit is already confirmed)
 	recipients, amounts, err := s.getRecipientsFromRelayer(intentID.String())
 	if err != nil {
 		log.WithError(err).Error("Failed to get recipients from relayer")
@@ -551,9 +670,8 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 	log.WithFields(log.Fields{
 		"intentID":       intentID,
 		"recipientCount": len(recipients),
-	}).Info("Successfully retrieved recipients from relayer")
+	}).Debug("Retrieved recipients from relayer")
 
-	// Convert to proper types
 	recipientAddrs := make([]common.Address, len(recipients))
 	amountBigInts := make([]*big.Int, len(amounts))
 	totalAmount := big.NewInt(0)
@@ -570,40 +688,43 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 
 	destClient := s.clients[destNetwork]
 
-	// Approve tokenB for the bridge contract on destination chain
 	tokenBAddr := common.HexToAddress(intent.TokenB)
 	log.WithFields(log.Fields{
 		"intentID":    intentID,
 		"tokenB":      intent.TokenB,
 		"totalAmount": totalAmount.String(),
-	}).Info("Approving tokenB for solving on destination chain...")
+	}).Debug("Approving tokenB for solving on destination chain")
 
-	approveTx, err := destClient.ApproveToken(ctx, tokenBAddr, totalAmount)
+	s.txMutexes[destNetwork].Lock()
+	defer s.txMutexes[destNetwork].Unlock()
+
+	approveTx, err := s.retryTransaction(ctx, destNetwork, "approve-tokenB", func() (*ethtypes.Transaction, error) {
+		return destClient.ApproveToken(ctx, tokenBAddr, totalAmount)
+	})
 	if err != nil {
-		log.WithError(err).Error("Failed to approve tokenB")
+		log.WithError(err).Error("Failed to approve tokenB after retries")
 		return
 	}
 
-	// Wait for approval to be confirmed
 	_, err = destClient.WaitForTransaction(ctx, approveTx)
 	if err != nil {
 		log.WithError(err).Error("Failed to confirm tokenB approval")
 		return
 	}
 
-	log.WithField("intentID", intentID).Info("TokenB approved, solving intent...")
+	log.WithField("intentID", intentID).Debug("TokenB approved, solving intent")
 
-	// Solve intent on destination chain with all required parameters
 	userAddr := common.HexToAddress(intent.User)
 	expectedAmountB := intent.ExpectedAmountB
 
-	tx, err := destClient.SolveIntentOnChain2(ctx, intentID, userAddr, tokenBAddr, expectedAmountB, recipientAddrs, amountBigInts)
+	tx, err := s.retryTransaction(ctx, destNetwork, "solve-intent", func() (*ethtypes.Transaction, error) {
+		return destClient.SolveIntentOnChain2(ctx, intentID, userAddr, tokenBAddr, expectedAmountB, recipientAddrs, amountBigInts)
+	})
 	if err != nil {
-		log.WithError(err).Error("Failed to solve intent on chain2")
+		log.WithError(err).Error("Failed to solve intent on chain2 after retries")
 		return
 	}
 
-	// Wait for solve transaction to be confirmed
 	_, err = destClient.WaitForTransaction(ctx, tx)
 	if err != nil {
 		log.WithError(err).Error("Failed to confirm solve transaction")
@@ -616,22 +737,20 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 		"txHash":      tx.Hash().Hex(),
 	}).Info("Intent solved on destination chain and confirmed")
 
-	// Call relayer to settle the intent
 	go s.settleIntent(ctx, sourceNetwork, intentID, intentID, destClient.GetAddress())
 }
 
-// getRecipientsFromRelayer fetches recipient information from the relayer
+// getRecipientsFromRelayer fetches recipient information from the relayer.
+// Includes solver address in request header for authorization.
 func (s *Solver) getRecipientsFromRelayer(intentID string) ([]string, []string, error) {
 	url := fmt.Sprintf("%s/get-recipients/%s", s.cfg.RelayerURL, intentID)
 
-	// Get solver's address (use any client, they all have the same address)
 	var solverAddr string
 	for _, client := range s.clients {
 		solverAddr = client.GetAddress().Hex()
 		break
 	}
 
-	// Create request with solver address header
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create request: %w", err)
@@ -665,19 +784,19 @@ func (s *Solver) getRecipientsFromRelayer(intentID string) ([]string, []string, 
 	log.WithFields(log.Fields{
 		"intentID":       intentID,
 		"recipientCount": len(recipientInfo.Recipients),
-	}).Info("Retrieved recipients from relayer")
+	}).Debug("Retrieved recipients from relayer")
 
 	return recipientInfo.Recipients, recipientInfo.Amounts, nil
 }
 
-// settleIntent calls the relayer to settle an intent
+// settleIntent calls the relayer to settle an intent on the source chain
 func (s *Solver) settleIntent(ctx context.Context, network string, chain1IntentID, chain2IntentID *big.Int, solverAddr common.Address) {
 	settleReq := types.SettleRequest{
 		IntentID:         chain1IntentID.String(),
 		Network:          network,
 		Chain2IntentID:   chain2IntentID.String(),
 		SolverAddress:    solverAddr.Hex(),
-		DestinationChain: "base", // For now, hardcoded
+		DestinationChain: "base",
 	}
 
 	body, err := json.Marshal(settleReq)
@@ -727,7 +846,6 @@ func (s *Solver) settleIntent(ctx context.Context, network string, chain1IntentI
 	}
 }
 
-// Close closes all blockchain clients
 func (s *Solver) Close() {
 	for _, client := range s.clients {
 		client.Close()

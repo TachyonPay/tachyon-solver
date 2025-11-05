@@ -19,7 +19,6 @@ func NewSolverAPI(s *solver.Solver) *SolverAPI {
 	return &SolverAPI{solver: s}
 }
 
-// RegisterRoutes registers all solver API routes
 func (api *SolverAPI) RegisterRoutes(r *gin.Engine) {
 	r.GET("/health", api.HealthCheck)
 	r.GET("/status", api.GetStatus)
@@ -30,7 +29,6 @@ func (api *SolverAPI) RegisterRoutes(r *gin.Engine) {
 	r.POST("/stop", api.StopSolver)
 }
 
-// HealthCheck returns the health status of the solver
 func (api *SolverAPI) HealthCheck(c *gin.Context) {
 	activeIntents := api.solver.GetActiveIntents()
 
@@ -42,7 +40,6 @@ func (api *SolverAPI) HealthCheck(c *gin.Context) {
 	})
 }
 
-// GetStatus returns detailed solver status
 func (api *SolverAPI) GetStatus(c *gin.Context) {
 	activeIntents := api.solver.GetActiveIntents()
 	balances := api.solver.GetBalances(c.Request.Context())
@@ -58,7 +55,6 @@ func (api *SolverAPI) GetStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-// GetActiveIntents returns all active intents
 func (api *SolverAPI) GetActiveIntents(c *gin.Context) {
 	activeIntents := api.solver.GetActiveIntents()
 
@@ -73,7 +69,6 @@ func (api *SolverAPI) GetActiveIntents(c *gin.Context) {
 func (api *SolverAPI) GetIntentStatus(c *gin.Context) {
 	intentID := c.Param("intentId")
 
-	// Try to find the intent in any network
 	activeIntents := api.solver.GetActiveIntents()
 	for _, status := range activeIntents {
 		if status.IntentID == intentID {
@@ -91,7 +86,6 @@ func (api *SolverAPI) GetIntentStatus(c *gin.Context) {
 	})
 }
 
-// GetIntentStatusByNetwork returns the status of a specific intent on a specific network
 func (api *SolverAPI) GetIntentStatusByNetwork(c *gin.Context) {
 	intentID := c.Param("intentId")
 	network := c.Param("network")
@@ -111,7 +105,6 @@ func (api *SolverAPI) GetIntentStatusByNetwork(c *gin.Context) {
 	})
 }
 
-// StartSolver starts the solver
 func (api *SolverAPI) StartSolver(c *gin.Context) {
 	if api.solver.IsRunning() {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -136,7 +129,6 @@ func (api *SolverAPI) StartSolver(c *gin.Context) {
 	})
 }
 
-// StopSolver stops the solver
 func (api *SolverAPI) StopSolver(c *gin.Context) {
 	if !api.solver.IsRunning() {
 		c.JSON(http.StatusBadRequest, gin.H{

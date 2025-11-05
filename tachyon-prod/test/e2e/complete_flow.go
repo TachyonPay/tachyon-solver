@@ -163,78 +163,96 @@ func main() {
 	tokenA := bind.NewBoundContract(tokenAAddr, erc20ABI, clients.HorizenClient, clients.HorizenClient, clients.HorizenClient)
 	_ = tokenA // Used for approvals in Step 2
 
-	// STEP 1.5: Generate recipients and store in relayer
-	fmt.Println("📋 STEP 1.5: Generating recipients and storing in relayer...")
+	// STEP 1.5: Approve tokens for multiple intent creations
+	fmt.Println("📋 STEP 1.5: Approving tokens for multiple intents...")
 
-	recipients := []string{
-		utils.GenerateRandomAddress().Hex(),
-		utils.GenerateRandomAddress().Hex(),
-		utils.GenerateRandomAddress().Hex(),
-	}
-	amounts := []*big.Int{
-		utils.ParseEther("30"),
-		utils.ParseEther("35"),
-		utils.ParseEther("30"),
-	}
-	amountStrings := make([]string, len(amounts))
-	for i, amt := range amounts {
-		amountStrings[i] = amt.String()
-	}
-
-	fmt.Printf("🎯 Recipients: %v\n", recipients)
-	fmt.Printf("💰 Amounts: %v ETH\n\n", []string{"30", "35", "30"})
-
-	// STEP 2: Create intent on Horizen
-	fmt.Println("🎯 STEP 2: Creating intent on Horizen Testnet...")
-
+	numIntents := 5
 	expectedAmountB := utils.ParseEther("95")
 	reward := utils.ParseEther("5")
+	approveAmountPerIntent := new(big.Int).Add(expectedAmountB, reward)
+	totalApproveAmount := new(big.Int).Mul(approveAmountPerIntent, big.NewInt(int64(numIntents)))
 
-	// Approve tokens for intent creation
 	auth, err := utils.GetTransactOpts(ctx, clients.HorizenClient, clients.Wallet, clients.HorizenChainID)
 	if err != nil {
 		fmt.Printf("❌ Failed to create auth: %v\n", err)
 		os.Exit(1)
 	}
 
-	approveAmount := new(big.Int).Add(expectedAmountB, reward)
-	approveTx, err := tokenA.Transact(auth, "approve", common.HexToAddress(cfg.BridgeHorizenAddr), approveAmount)
+	approveTx, err := tokenA.Transact(auth, "approve", common.HexToAddress(cfg.BridgeHorizenAddr), totalApproveAmount)
 	if err != nil {
 		fmt.Printf("❌ Failed to approve tokens: %v\n", err)
 		os.Exit(1)
 	}
 	utils.WaitForTransaction(ctx, clients.HorizenClient, approveTx.Hash(), 2*time.Minute)
-	fmt.Println("✅ Approved tokens for intent creation")
+	fmt.Printf("✅ Approved tokens for %d intents\n\n", numIntents)
 
-	// Create intent
-	auth, _ = utils.GetTransactOpts(ctx, clients.HorizenClient, clients.Wallet, clients.HorizenChainID)
-	createIntentTx, err := bridgeHorizen.Transact(auth, "createIntent",
-		tokenAAddr, tokenBAddr, expectedAmountB, expectedAmountB, reward, big.NewInt(cfg.AuctionDuration))
-	if err != nil {
-		fmt.Printf("❌ Failed to create intent: %v\n", err)
-		os.Exit(1)
+	// STEP 2: Create multiple intents sequentially
+	fmt.Printf("🎯 STEP 2: Creating %d intents sequentially on Horizen Testnet...\n", numIntents)
+
+	createdIntents := make([]*big.Int, 0, numIntents)
+
+	for i := 0; i < numIntents; i++ {
+		intentNum := i + 1
+		expectedIntentID := new(big.Int).Add(targetIntentID, big.NewInt(int64(i)))
+
+		recipients := []string{
+			utils.GenerateRandomAddress().Hex(),
+			utils.GenerateRandomAddress().Hex(),
+			utils.GenerateRandomAddress().Hex(),
+		}
+		amounts := []*big.Int{
+			utils.ParseEther("30"),
+			utils.ParseEther("35"),
+			utils.ParseEther("30"),
+		}
+		amountStrings := make([]string, len(amounts))
+		for j, amt := range amounts {
+			amountStrings[j] = amt.String()
+		}
+
+		fmt.Printf("  [Intent %d] Creating intent ID %s...\n", intentNum, expectedIntentID)
+
+		auth, err := utils.GetTransactOpts(ctx, clients.HorizenClient, clients.Wallet, clients.HorizenChainID)
+		if err != nil {
+			fmt.Printf("❌ Failed to get transaction opts for intent %s: %v\n", expectedIntentID, err)
+			continue
+		}
+
+		createIntentTx, err := bridgeHorizen.Transact(auth, "createIntent",
+			tokenAAddr, tokenBAddr, expectedAmountB, expectedAmountB, reward, big.NewInt(cfg.AuctionDuration))
+		if err != nil {
+			fmt.Printf("❌ Failed to create intent %s: %v\n", expectedIntentID, err)
+			continue
+		}
+
+		utils.WaitForTransaction(ctx, clients.HorizenClient, createIntentTx.Hash(), 2*time.Minute)
+		fmt.Printf("  [Intent %d] Created with tx: %s\n", intentNum, createIntentTx.Hash().Hex())
+
+		go func(num int, intentID *big.Int, recs []string, amts []string, chainID int64) {
+			if err := storeRecipients(cfg.RelayerURL, intentID.String(), recs, amts, chainID); err != nil {
+				fmt.Printf("  [Intent %d] Failed to store recipients: %v\n", num, err)
+			} else {
+				fmt.Printf("  [Intent %d] Recipients stored\n", num)
+			}
+		}(intentNum, expectedIntentID, recipients, amountStrings, clients.BaseChainID.Int64())
+
+		createdIntents = append(createdIntents, expectedIntentID)
 	}
-	utils.WaitForTransaction(ctx, clients.HorizenClient, createIntentTx.Hash(), 2*time.Minute)
-	fmt.Println("✅ Intent created on Horizen")
 
-	// Use the target intent ID (we just created it, so it should be the next one)
-	actualIntentID := targetIntentID
-	fmt.Printf("🎯 Actual Intent ID: %s\n", actualIntentID)
-	fmt.Printf("📍 Transaction: https://horizen-explorer-testnet.appchain.base.org/tx/%s\n\n", createIntentTx.Hash().Hex())
-
-	// Store recipients in relayer
-	if err := storeRecipients(cfg.RelayerURL, actualIntentID.String(), recipients, amountStrings, clients.BaseChainID.Int64()); err != nil {
-		fmt.Printf("❌ Failed to store recipients: %v\n", err)
-	} else {
-		fmt.Println("✅ Recipients stored in relayer")
+	fmt.Printf("\n✅ Successfully created %d intents: ", len(createdIntents))
+	for _, id := range createdIntents {
+		fmt.Printf("%s ", id)
 	}
+	fmt.Println()
 
 	// STEP 3-6: Let solver handle everything (bidding, auction, deposit, pickup)
-	fmt.Println("\n🤖 STEP 3-6: Waiting for solver to handle complete auction process...")
-	fmt.Printf("⏳ This includes: bidding, auction finalization, and deposit/pickup\n")
+	fmt.Println("\n🤖 STEP 3-6: Waiting for solver to handle complete auction process for all intents...")
+	fmt.Printf("⏳ This includes: bidding, auction finalization, and deposit/pickup for %d intents\n", len(createdIntents))
 	fmt.Printf("⏳ Waiting %d seconds for solver to complete all steps...\n", cfg.AuctionDuration+15)
 	utils.SleepWithProgress(time.Duration(cfg.AuctionDuration+15)*time.Second, "Waiting for solver")
-	fmt.Println("✅ Solver should have completed bidding, auction, and deposit")
+	fmt.Printf("✅ Solver should have completed bidding, auction, and deposit for %d intents\n", len(createdIntents))
+
+	actualIntentID := createdIntents[0]
 
 	// COMMENTED OUT: Manual bidding, auction, and deposit - let solver handle everything
 	// // STEP 3: Place bid

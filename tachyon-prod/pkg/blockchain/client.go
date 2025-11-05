@@ -35,25 +35,20 @@ type Client struct {
 
 // NewClient creates a new blockchain client
 func NewClient(rpcURL string, contractAddress string, privateKeyHex string, chainID *big.Int, networkName string) (*Client, error) {
-	// Connect to Ethereum client
 	ethClient, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Ethereum client: %w", err)
 	}
 
-	// Parse contract address
 	contractAddr := common.HexToAddress(contractAddress)
 
-	// Parse contract ABI
 	contractABI, err := abi.JSON(strings.NewReader(bridgeIntentABI))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse contract ABI: %w", err)
 	}
 
-	// Create bound contract
 	contract := bind.NewBoundContract(contractAddr, contractABI, ethClient, ethClient, ethClient)
 
-	// Parse private key
 	privateKey, err := crypto.HexToECDSA(strings.TrimPrefix(privateKeyHex, "0x"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse private key: %w", err)
@@ -91,9 +86,9 @@ func (c *Client) GetAddress() common.Address {
 	return c.address
 }
 
-// GetBalance returns the token balance for the wallet
+// GetBalance returns the token balance for the wallet.
+// If tokenAddress is zero, returns ETH balance; otherwise returns ERC20 balance.
 func (c *Client) GetBalance(ctx context.Context, tokenAddress common.Address) (*big.Int, error) {
-	// If zero address, return ETH balance
 	if tokenAddress == (common.Address{}) {
 		balance, err := c.ethClient.BalanceAt(ctx, c.address, nil)
 		if err != nil {
@@ -102,7 +97,6 @@ func (c *Client) GetBalance(ctx context.Context, tokenAddress common.Address) (*
 		return balance, nil
 	}
 
-	// Get ERC20 token balance
 	tokenABI := `[{"constant":true,"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"type":"function"}]`
 	parsedABI, err := abi.JSON(strings.NewReader(tokenABI))
 	if err != nil {
@@ -136,7 +130,6 @@ func (c *Client) GetIntent(ctx context.Context, intentID *big.Int) (*pkgtypes.In
 		return nil, fmt.Errorf("no result returned")
 	}
 
-	// Parse the result tuple
 	intentData := result[0].(struct {
 		IntentId        *big.Int       `json:"intentId"`
 		User            common.Address `json:"user"`
@@ -203,7 +196,7 @@ func (c *Client) PlaceBid(ctx context.Context, intentID *big.Int, bidAmount *big
 		"intentID": intentID,
 		"bidAmount": bidAmount,
 		"txHash":   tx.Hash().Hex(),
-	}).Info("Bid placed")
+	}).Debug("Bid placed")
 
 	return tx, nil
 }
@@ -224,7 +217,7 @@ func (c *Client) DepositAndPickup(ctx context.Context, intentID *big.Int) (*type
 		"network":  c.networkName,
 		"intentID": intentID,
 		"txHash":   tx.Hash().Hex(),
-	}).Info("Deposit and pickup executed")
+	}).Debug("Deposit and pickup executed")
 
 	return tx, nil
 }
@@ -245,18 +238,13 @@ func (c *Client) FinalizeAuction(ctx context.Context, intentID *big.Int) (*types
 		"network":  c.networkName,
 		"intentID": intentID,
 		"txHash":   tx.Hash().Hex(),
-	}).Info("Auction finalized")
+	}).Debug("Auction finalized")
 
 	return tx, nil
 }
 
 // WaitForTransaction waits for a transaction to be mined and confirmed
 func (c *Client) WaitForTransaction(ctx context.Context, tx *types.Transaction) (*types.Receipt, error) {
-	log.WithFields(log.Fields{
-		"network": c.networkName,
-		"txHash":  tx.Hash().Hex(),
-	}).Info("Waiting for transaction confirmation...")
-
 	receipt, err := bind.WaitMined(ctx, c.ethClient, tx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to wait for transaction: %w", err)
@@ -278,7 +266,6 @@ func (c *Client) WaitForTransaction(ctx context.Context, tx *types.Transaction) 
 
 // ApproveToken approves token spending for the bridge contract
 func (c *Client) ApproveToken(ctx context.Context, tokenAddress common.Address, amount *big.Int) (*types.Transaction, error) {
-	// ERC20 ABI for approve function
 	erc20ABI, err := abi.JSON(strings.NewReader(`[{"inputs":[{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"approve","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"}]`))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse ERC20 ABI: %w", err)
@@ -302,7 +289,7 @@ func (c *Client) ApproveToken(ctx context.Context, tokenAddress common.Address, 
 		"spender": c.contractAddr.Hex(),
 		"amount":  amount.String(),
 		"txHash":  tx.Hash().Hex(),
-	}).Info("Token approval submitted")
+	}).Debug("Token approval submitted")
 
 	return tx, nil
 }
@@ -326,7 +313,7 @@ func (c *Client) SolveIntentOnChain2(ctx context.Context, intentID *big.Int, use
 		"tokenB":     tokenB.Hex(),
 		"recipients": len(recipients),
 		"txHash":     tx.Hash().Hex(),
-	}).Info("Intent solved on chain2")
+	}).Debug("Intent solved on chain2")
 
 	return tx, nil
 }
@@ -348,14 +335,14 @@ func (c *Client) SettleIntent(ctx context.Context, chain1IntentID *big.Int, chai
 		"chain1IntentID": chain1IntentID,
 		"chain2IntentID": chain2IntentID,
 		"txHash":         tx.Hash().Hex(),
-	}).Info("Intent settled")
+	}).Debug("Intent settled")
 
 	return tx, nil
 }
 
-// VerifyIntentSolved checks if an intent has been solved on chain2
+// VerifyIntentSolved checks if an intent has been solved on chain2.
+// Tries isIntentSolvedOnChain2 first, then falls back to solvedIntents mapping.
 func (c *Client) VerifyIntentSolved(ctx context.Context, intentID *big.Int) (bool, error) {
-	// Try using the isIntentSolvedOnChain2 function first
 	var resultFunc []interface{}
 	err := c.contract.Call(&bind.CallOpts{Context: ctx}, &resultFunc, "isIntentSolvedOnChain2", intentID)
 	if err == nil && len(resultFunc) > 0 {
@@ -369,7 +356,6 @@ func (c *Client) VerifyIntentSolved(ctx context.Context, intentID *big.Int) (boo
 		return solved, nil
 	}
 
-	// Fallback to direct mapping access
 	var result []interface{}
 	err = c.contract.Call(&bind.CallOpts{Context: ctx}, &result, "solvedIntents", intentID)
 	if err != nil {
@@ -425,7 +411,8 @@ func (c *Client) GetLogs(ctx context.Context, fromBlock, toBlock *big.Int, event
 	return logs, nil
 }
 
-// ParseIntentCreatedEvent parses an IntentCreated event log
+// ParseIntentCreatedEvent parses an IntentCreated event log.
+// Extracts intentID from event topics (second topic contains indexed intentId).
 func (c *Client) ParseIntentCreatedEvent(log types.Log) (intentID *big.Int, err error) {
 	event := struct {
 		IntentID        *big.Int
@@ -443,7 +430,6 @@ func (c *Client) ParseIntentCreatedEvent(log types.Log) (intentID *big.Int, err 
 		return nil, fmt.Errorf("failed to unpack event: %w", err)
 	}
 
-	// First topic is event signature, second is intentId (indexed)
 	if len(log.Topics) > 1 {
 		intentID = new(big.Int).SetBytes(log.Topics[1].Bytes())
 	}
@@ -460,7 +446,7 @@ func (c *Client) GetCurrentBlock(ctx context.Context) (*big.Int, error) {
 	return new(big.Int).SetUint64(blockNumber), nil
 }
 
-// getTransactOpts creates transaction options with gas estimation
+// getTransactOpts creates transaction options with gas estimation and nonce management
 func (c *Client) getTransactOpts(ctx context.Context) (*bind.TransactOpts, error) {
 	nonce, err := c.ethClient.PendingNonceAt(ctx, c.address)
 	if err != nil {
@@ -486,7 +472,6 @@ func (c *Client) getTransactOpts(ctx context.Context) (*bind.TransactOpts, error
 	return auth, nil
 }
 
-// Close closes the Ethereum client connection
 func (c *Client) Close() {
 	c.ethClient.Close()
 }

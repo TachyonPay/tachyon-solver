@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	log "github.com/sirupsen/logrus"
 	"github.com/zk-tachyon/tachyon-prod/pkg/blockchain"
 	"github.com/zk-tachyon/tachyon-prod/pkg/config"
@@ -20,13 +22,14 @@ type Relayer struct {
 	clients        map[string]*blockchain.Client
 	recipientStore map[string]*types.RecipientInfo
 	mu             sync.RWMutex
+	txMutexes      map[string]*sync.Mutex
 }
 
 // NewRelayer creates a new relayer instance
 func NewRelayer(cfg *config.Config) (*Relayer, error) {
 	clients := make(map[string]*blockchain.Client)
+	txMutexes := make(map[string]*sync.Mutex)
 
-	// Initialize blockchain clients for each network
 	for networkKey, networkCfg := range cfg.Networks {
 		client, err := blockchain.NewClient(
 			networkCfg.RpcURL,
@@ -39,6 +42,7 @@ func NewRelayer(cfg *config.Config) (*Relayer, error) {
 			return nil, fmt.Errorf("failed to create client for %s: %w", networkKey, err)
 		}
 		clients[networkKey] = client
+		txMutexes[networkKey] = &sync.Mutex{}
 		log.WithField("network", networkKey).Info("Relayer blockchain client initialized")
 	}
 
@@ -46,6 +50,7 @@ func NewRelayer(cfg *config.Config) (*Relayer, error) {
 		cfg:            cfg,
 		clients:        clients,
 		recipientStore: make(map[string]*types.RecipientInfo),
+		txMutexes:      txMutexes,
 	}, nil
 }
 
@@ -54,12 +59,10 @@ func (r *Relayer) StoreRecipients(req *types.StoreRecipientsRequest) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Validate arrays match
 	if len(req.Recipients) != len(req.Amounts) {
 		return fmt.Errorf("recipients and amounts length mismatch")
 	}
 
-	// Calculate total amount
 	totalAmount := big.NewInt(0)
 	for _, amountStr := range req.Amounts {
 		amount, ok := new(big.Int).SetString(amountStr, 10)
@@ -69,7 +72,6 @@ func (r *Relayer) StoreRecipients(req *types.StoreRecipientsRequest) error {
 		totalAmount.Add(totalAmount, amount)
 	}
 
-	// Store recipient information
 	r.recipientStore[req.IntentID] = &types.RecipientInfo{
 		Success:     true,
 		IntentID:    req.IntentID,
@@ -102,9 +104,9 @@ func (r *Relayer) GetRecipients(intentID string) (*types.RecipientInfo, error) {
 	return info, nil
 }
 
-// GetRecipientsForWinner retrieves recipients only if the requester is the winning solver
+// GetRecipientsForWinner retrieves recipients only if the requester is the winning solver.
+// Verifies that the solver has deposited before granting access to recipient information.
 func (r *Relayer) GetRecipientsForWinner(ctx context.Context, intentID string, requesterAddr string) (*types.RecipientInfo, error) {
-	// First check if recipients exist
 	r.mu.RLock()
 	info, ok := r.recipientStore[intentID]
 	chainID := info.ChainID
@@ -114,9 +116,6 @@ func (r *Relayer) GetRecipientsForWinner(ctx context.Context, intentID string, r
 		return nil, fmt.Errorf("recipients not found for intent %s", intentID)
 	}
 
-	// Determine source chain to check (opposite of destination chain)
-	// The stored chainID is the destination chain, so we need to check the OTHER chain (source)
-	// Source chain is where the auction happened and winner deposited
 	var sourceNetwork string
 	for key, cfg := range r.cfg.Networks {
 		if cfg.ChainID.Int64() != chainID {
@@ -129,31 +128,16 @@ func (r *Relayer) GetRecipientsForWinner(ctx context.Context, intentID string, r
 		return nil, fmt.Errorf("could not determine source network")
 	}
 
-	log.WithFields(log.Fields{
-		"intentID":          intentID,
-		"destinationChainID": chainID,
-		"sourceNetwork":     sourceNetwork,
-	}).Debug("Checking intent on source chain")
-
 	client := r.clients[sourceNetwork]
 	intentIDBig, ok := new(big.Int).SetString(intentID, 10)
 	if !ok {
 		return nil, fmt.Errorf("invalid intent ID")
 	}
 
-	// Get intent from blockchain
 	intent, err := client.GetIntent(ctx, intentIDBig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get intent from blockchain: %w", err)
 	}
-
-	// Check if the requester is the winning solver and has deposited
-	log.WithFields(log.Fields{
-		"intentID":      intentID,
-		"deposited":     intent.Deposited,
-		"winningSolver": intent.WinningSolver,
-		"requester":     requesterAddr,
-	}).Info("Checking authorization for recipient access")
 
 	if !intent.Deposited {
 		log.WithField("intentID", intentID).Warn("Intent not deposited yet")
@@ -163,15 +147,6 @@ func (r *Relayer) GetRecipientsForWinner(ctx context.Context, intentID string, r
 	requesterAddress := common.HexToAddress(requesterAddr)
 	winningAddress := common.HexToAddress(intent.WinningSolver)
 
-	log.WithFields(log.Fields{
-		"intentID":             intentID,
-		"requesterAddr":        requesterAddr,
-		"requesterAddressNorm": requesterAddress.Hex(),
-		"winningSolver":        intent.WinningSolver,
-		"winningAddressNorm":   winningAddress.Hex(),
-		"match":                requesterAddress == winningAddress,
-	}).Info("Address comparison")
-
 	if requesterAddress != winningAddress {
 		log.WithFields(log.Fields{
 			"intentID":        intentID,
@@ -180,11 +155,6 @@ func (r *Relayer) GetRecipientsForWinner(ctx context.Context, intentID string, r
 		}).Warn("Unauthorized recipient access attempt")
 		return nil, fmt.Errorf("access denied: not the winning solver for this intent")
 	}
-
-	log.WithFields(log.Fields{
-		"intentID": intentID,
-		"solver":   requesterAddr,
-	}).Info("Authorized recipient access by winning solver")
 
 	return info, nil
 }
@@ -212,7 +182,7 @@ func (r *Relayer) DeleteRecipients(intentID string) error {
 	}
 
 	delete(r.recipientStore, intentID)
-	log.WithField("intentID", intentID).Info("Deleted recipient information")
+	log.WithField("intentID", intentID).Debug("Deleted recipient information")
 
 	return nil
 }
@@ -237,9 +207,9 @@ func (r *Relayer) VerifyIntentSolved(ctx context.Context, network string, intent
 	return solved, nil
 }
 
-// SettleIntent settles an intent with basic verification (no zkverify)
+// SettleIntent settles an intent with basic verification on the source chain.
+// Verifies the intent is solved on the destination chain before settling.
 func (r *Relayer) SettleIntent(ctx context.Context, req *types.SettleRequest) (*types.RelayerResponse, error) {
-	// Validate network
 	client, ok := r.clients[req.Network]
 	if !ok {
 		return &types.RelayerResponse{
@@ -248,7 +218,6 @@ func (r *Relayer) SettleIntent(ctx context.Context, req *types.SettleRequest) (*
 		}, nil
 	}
 
-	// Parse intent IDs
 	chain1IntentID, ok := new(big.Int).SetString(req.IntentID, 10)
 	if !ok {
 		return &types.RelayerResponse{
@@ -265,28 +234,15 @@ func (r *Relayer) SettleIntent(ctx context.Context, req *types.SettleRequest) (*
 		}, nil
 	}
 
-	solverAddr := common.HexToAddress(req.SolverAddress)
 
-	// Basic verification: Check if intent is solved on destination chain
 	destNetwork := r.getDestinationNetwork(req.Network)
 
-	log.WithFields(log.Fields{
-		"sourceNetwork":  req.Network,
-		"destNetwork":    destNetwork,
-		"chain2IntentID": req.Chain2IntentID,
-	}).Info("Verifying intent on destination chain...")
-
-	// Retry verification with small delays for blockchain propagation
 	var solved bool
 	var err error
 	maxRetries := 3
 	for i := 0; i < maxRetries; i++ {
 		if i > 0 {
-			log.WithFields(log.Fields{
-				"attempt": i + 1,
-				"intentID": req.Chain2IntentID,
-			}).Info("Retrying verification...")
-			time.Sleep(time.Duration(i) * 2 * time.Second) // 2s, 4s delays
+			time.Sleep(time.Duration(i) * 2 * time.Second)
 		}
 
 		solved, err = r.VerifyIntentSolved(ctx, destNetwork, req.Chain2IntentID)
@@ -321,23 +277,20 @@ func (r *Relayer) SettleIntent(ctx context.Context, req *types.SettleRequest) (*
 		}, nil
 	}
 
-	log.WithFields(log.Fields{
-		"chain1IntentID": chain1IntentID,
-		"chain2IntentID": chain2IntentID,
-		"solver":         solverAddr.Hex(),
-	}).Info("Intent verified, settling...")
+	r.txMutexes[req.Network].Lock()
+	defer r.txMutexes[req.Network].Unlock()
 
-	// Settle the intent
-	tx, err := client.SettleIntent(ctx, chain1IntentID, chain2IntentID)
+	tx, err := r.retryTransaction(ctx, req.Network, "settle-intent", func() (*ethtypes.Transaction, error) {
+		return client.SettleIntent(ctx, chain1IntentID, chain2IntentID)
+	})
 	if err != nil {
-		log.WithError(err).Error("Failed to settle intent")
+		log.WithError(err).Error("Failed to settle intent after retries")
 		return &types.RelayerResponse{
 			Success: false,
 			Error:   fmt.Sprintf("settlement failed: %v", err),
 		}, nil
 	}
 
-	// Wait for transaction receipt
 	time.Sleep(2 * time.Second)
 
 	return &types.RelayerResponse{
@@ -351,7 +304,6 @@ func (r *Relayer) SettleIntent(ctx context.Context, req *types.SettleRequest) (*
 	}, nil
 }
 
-// getDestinationNetwork returns the opposite network
 func (r *Relayer) getDestinationNetwork(sourceNetwork string) string {
 	if sourceNetwork == "horizen" {
 		return "base"
@@ -359,7 +311,60 @@ func (r *Relayer) getDestinationNetwork(sourceNetwork string) string {
 	return "horizen"
 }
 
-// GetNetworks returns the list of configured networks
+// retryTransaction retries a transaction function up to maxRetries times on nonce errors
+func (r *Relayer) retryTransaction(ctx context.Context, network string, operation string, txFunc func() (*ethtypes.Transaction, error)) (*ethtypes.Transaction, error) {
+	maxRetries := 10
+	var lastErr error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			backoffDuration := time.Duration(attempt) * 500 * time.Millisecond
+			log.WithFields(log.Fields{
+				"operation": operation,
+				"attempt":   attempt + 1,
+				"backoff":   backoffDuration,
+			}).Warn("Retrying transaction after nonce conflict")
+			time.Sleep(backoffDuration)
+		}
+
+		tx, err := txFunc()
+		if err == nil {
+			if attempt > 0 {
+				log.WithFields(log.Fields{
+					"operation": operation,
+					"attempt":   attempt + 1,
+				}).Info("Transaction succeeded after retry")
+			}
+			return tx, nil
+		}
+
+		lastErr = err
+		errStr := err.Error()
+
+		isNonceError := strings.Contains(errStr, "nonce") ||
+			strings.Contains(errStr, "replacement transaction underpriced") ||
+			strings.Contains(errStr, "already known")
+
+		if !isNonceError {
+			return nil, err
+		}
+
+		log.WithFields(log.Fields{
+			"operation": operation,
+			"attempt":   attempt + 1,
+			"error":     errStr,
+		}).Debug("Nonce conflict detected, will retry")
+	}
+
+	log.WithFields(log.Fields{
+		"operation":   operation,
+		"maxRetries":  maxRetries,
+		"finalError":  lastErr.Error(),
+	}).Error("Transaction failed after all retries")
+
+	return nil, fmt.Errorf("transaction failed after %d retries: %w", maxRetries, lastErr)
+}
+
 func (r *Relayer) GetNetworks() []string {
 	networks := make([]string, 0, len(r.clients))
 	for network := range r.clients {
@@ -368,7 +373,6 @@ func (r *Relayer) GetNetworks() []string {
 	return networks
 }
 
-// GetChainInfo returns chain information for all networks
 func (r *Relayer) GetChainInfo() map[string]string {
 	info := make(map[string]string)
 	for networkKey, cfg := range r.cfg.Networks {
@@ -377,7 +381,6 @@ func (r *Relayer) GetChainInfo() map[string]string {
 	return info
 }
 
-// Close closes all blockchain clients
 func (r *Relayer) Close() {
 	for _, client := range r.clients {
 		client.Close()

@@ -14,15 +14,13 @@ import (
 )
 
 func main() {
-	// Initialize logger
 	log.SetFormatter(&log.TextFormatter{
 		FullTimestamp: true,
 	})
 	log.SetLevel(log.InfoLevel)
 
-	log.Info("Starting Tachyon Solver Service...")
+	log.Info("Starting Tachyon Solver Service")
 
-	// Load configuration
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		log.WithError(err).Fatal("Failed to load configuration")
@@ -33,7 +31,6 @@ func main() {
 		"port":     cfg.SolverPort,
 	}).Info("Configuration loaded")
 
-	// Create solver instance
 	solverInstance, err := solver.NewSolver(cfg)
 	if err != nil {
 		log.WithError(err).Fatal("Failed to create solver")
@@ -42,16 +39,13 @@ func main() {
 
 	log.Info("Solver initialized successfully")
 
-	// Auto-start solver
 	if err := solverInstance.Start(); err != nil {
 		log.WithError(err).Warn("Failed to auto-start solver")
 	}
 
-	// Setup Gin router
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
 
-	// Add CORS middleware
 	router.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
@@ -65,15 +59,12 @@ func main() {
 		c.Next()
 	})
 
-	// Register API routes
 	solverAPI := api.NewSolverAPI(solverInstance)
 	solverAPI.RegisterRoutes(router)
 
-	// Setup graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start HTTP server in a goroutine
 	go func() {
 		addr := fmt.Sprintf(":%s", cfg.SolverPort)
 		log.WithField("address", addr).Info("Starting HTTP server")
@@ -83,9 +74,8 @@ func main() {
 		}
 	}()
 
-	// Wait for shutdown signal
 	<-quit
-	log.Info("Shutting down solver...")
+	log.Info("Shutting down solver")
 
 	solverInstance.Stop()
 	log.Info("Solver shutdown complete")

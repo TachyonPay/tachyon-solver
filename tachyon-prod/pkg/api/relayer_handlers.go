@@ -19,7 +19,6 @@ func NewRelayerAPI(r *relayer.Relayer) *RelayerAPI {
 	return &RelayerAPI{relayer: r}
 }
 
-// RegisterRoutes registers all relayer API routes
 func (api *RelayerAPI) RegisterRoutes(r *gin.Engine) {
 	r.GET("/health", api.HealthCheck)
 	r.POST("/store-recipients", api.StoreRecipients)
@@ -30,7 +29,6 @@ func (api *RelayerAPI) RegisterRoutes(r *gin.Engine) {
 	r.POST("/settle", api.SettleIntent)
 }
 
-// HealthCheck returns the health status of the relayer
 func (api *RelayerAPI) HealthCheck(c *gin.Context) {
 	networks := api.relayer.GetNetworks()
 	chainInfo := api.relayer.GetChainInfo()
@@ -44,7 +42,6 @@ func (api *RelayerAPI) HealthCheck(c *gin.Context) {
 	})
 }
 
-// StoreRecipients stores recipient information for an intent
 func (api *RelayerAPI) StoreRecipients(c *gin.Context) {
 	var req types.StoreRecipientsRequest
 
@@ -72,11 +69,10 @@ func (api *RelayerAPI) StoreRecipients(c *gin.Context) {
 	})
 }
 
-// GetRecipients retrieves stored recipient information (only for winning solver)
+// GetRecipients retrieves recipient information for the winning solver only
 func (api *RelayerAPI) GetRecipients(c *gin.Context) {
 	intentID := c.Param("intentId")
 
-	// Get the requester's address from header (solver should send this)
 	requesterAddr := c.GetHeader("X-Solver-Address")
 	if requesterAddr == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -98,7 +94,6 @@ func (api *RelayerAPI) GetRecipients(c *gin.Context) {
 	c.JSON(http.StatusOK, info)
 }
 
-// ListStoredIntents returns all stored intent IDs
 func (api *RelayerAPI) ListStoredIntents(c *gin.Context) {
 	intents := api.relayer.ListStoredIntents()
 
@@ -109,7 +104,6 @@ func (api *RelayerAPI) ListStoredIntents(c *gin.Context) {
 	})
 }
 
-// DeleteRecipients removes stored recipient information
 func (api *RelayerAPI) DeleteRecipients(c *gin.Context) {
 	intentID := c.Param("intentId")
 
@@ -128,7 +122,6 @@ func (api *RelayerAPI) DeleteRecipients(c *gin.Context) {
 	})
 }
 
-// VerifyIntent verifies if an intent has been solved on the destination chain
 func (api *RelayerAPI) VerifyIntent(c *gin.Context) {
 	var req types.VerifyRequest
 
@@ -157,7 +150,6 @@ func (api *RelayerAPI) VerifyIntent(c *gin.Context) {
 	})
 }
 
-// SettleIntent settles an intent with basic verification
 func (api *RelayerAPI) SettleIntent(c *gin.Context) {
 	var req types.SettleRequest
 
