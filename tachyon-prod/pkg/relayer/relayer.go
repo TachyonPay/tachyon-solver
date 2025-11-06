@@ -24,6 +24,7 @@ type Relayer struct {
 	cfg              *config.Config
 	clients          map[string]*blockchain.Client
 	recipientStore   map[string]*types.RecipientInfo
+	intentDetailsStore map[string]*types.IntentDetails // Key: sourceChainID-intentID
 	registeredSolvers map[string]*types.SolverInfo
 	mu               sync.RWMutex
 	txMutexes        map[string]*sync.Mutex
@@ -55,11 +56,12 @@ func NewRelayer(cfg *config.Config) (*Relayer, error) {
 	}
 
 	return &Relayer{
-		cfg:              cfg,
-		clients:          clients,
-		recipientStore:   make(map[string]*types.RecipientInfo),
-		registeredSolvers: make(map[string]*types.SolverInfo),
-		txMutexes:        txMutexes,
+		cfg:                cfg,
+		clients:            clients,
+		recipientStore:     make(map[string]*types.RecipientInfo),
+		intentDetailsStore: make(map[string]*types.IntentDetails),
+		registeredSolvers:  make(map[string]*types.SolverInfo),
+		txMutexes:          txMutexes,
 	}, nil
 }
 
@@ -552,9 +554,40 @@ func (r *Relayer) SettleIntent(ctx context.Context, req *types.SettleRequest) (*
 
 	time.Sleep(2 * time.Second)
 
+	settleTxHash := tx.Hash().Hex()
+
+	log.WithFields(log.Fields{
+		"intentID":      req.IntentID,
+		"settleTxHash":  settleTxHash,
+		"depositTxHash": req.DepositTxHash,
+		"solveTxHash":   req.SolveTxHash,
+	}).Info("Returning all transaction hashes to solver")
+
+	// Store intent details for frontend retrieval
+	intentKey := fmt.Sprintf("%s-%s", req.Network, req.IntentID)
+	r.mu.Lock()
+	r.intentDetailsStore[intentKey] = &types.IntentDetails{
+		IntentID:      req.IntentID,
+		SourceChainID: req.Network,
+		DestChainID:   destChainIDStr,
+		SolverAddress: req.SolverAddress,
+		DepositTxHash: req.DepositTxHash,
+		SolveTxHash:   req.SolveTxHash,
+		SettleTxHash:  settleTxHash,
+		Status:        "settled",
+		Timestamp:     time.Now(),
+		SettledAt:     time.Now(),
+	}
+	r.mu.Unlock()
+
+	log.WithField("intentKey", intentKey).Info("Stored intent details for frontend retrieval")
+
 	return &types.RelayerResponse{
 		Success:         true,
-		TransactionHash: tx.Hash().Hex(),
+		TransactionHash: settleTxHash,       // Deprecated: for backward compatibility
+		SettleTxHash:    settleTxHash,       // Settlement transaction on source chain
+		DepositTxHash:   req.DepositTxHash,  // From solver: deposit on source chain
+		SolveTxHash:     req.SolveTxHash,    // From solver: solve on destination chain
 		Network:         req.Network,
 		ChainID:         client.GetAddress().Big().Int64(),
 		IntentID:        req.IntentID,
@@ -833,6 +866,21 @@ func (r *Relayer) GetChainInfo() map[string]string {
 		info[networkKey] = fmt.Sprintf("Chain %s (ID: %s)", cfg.Name, cfg.ChainID.String())
 	}
 	return info
+}
+
+// GetIntentDetails retrieves stored intent details including all transaction hashes
+func (r *Relayer) GetIntentDetails(sourceChainID, intentID string) (*types.IntentDetails, error) {
+	intentKey := fmt.Sprintf("%s-%s", sourceChainID, intentID)
+
+	r.mu.RLock()
+	details, ok := r.intentDetailsStore[intentKey]
+	r.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("intent details not found for intentID=%s on chain=%s", intentID, sourceChainID)
+	}
+
+	return details, nil
 }
 
 func (r *Relayer) Close() {

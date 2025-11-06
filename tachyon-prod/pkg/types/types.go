@@ -66,7 +66,10 @@ type RecipientInfo struct {
 // RelayerResponse represents the response from relayer settlement
 type RelayerResponse struct {
 	Success         bool   `json:"success"`
-	TransactionHash string `json:"transactionHash,omitempty"`
+	TransactionHash string `json:"transactionHash,omitempty"` // Deprecated: use SettleTxHash
+	SettleTxHash    string `json:"settleTxHash,omitempty"`    // Settlement transaction hash on source chain
+	DepositTxHash   string `json:"depositTxHash,omitempty"`   // Deposit transaction hash on source chain
+	SolveTxHash     string `json:"solveTxHash,omitempty"`     // Solve transaction hash on destination chain
 	BlockNumber     uint64 `json:"blockNumber,omitempty"`
 	Network         string `json:"network,omitempty"`
 	ChainID         int64  `json:"chainId,omitempty"`
@@ -91,11 +94,15 @@ type StoreRecipientsRequest struct {
 
 // SettleRequest is the request body for settling an intent
 type SettleRequest struct {
-	IntentID        string `json:"intentId" binding:"required"`
-	Network         string `json:"network" binding:"required"`
-	Chain2IntentID  string `json:"chain2IntentId" binding:"required"`
-	SolverAddress   string `json:"solverAddress" binding:"required"`
+	IntentID         string `json:"intentId" binding:"required"`
+	Network          string `json:"network" binding:"required"`
+	Chain2IntentID   string `json:"chain2IntentId" binding:"required"`
+	SolverAddress    string `json:"solverAddress" binding:"required"`
 	DestinationChain string `json:"destinationChain" binding:"required"`
+
+	// Transaction hashes for frontend display
+	DepositTxHash    string `json:"depositTxHash,omitempty"`    // Deposit transaction on source chain
+	SolveTxHash      string `json:"solveTxHash,omitempty"`      // Solve transaction on destination chain
 }
 
 // VerifyRequest is the request body for verifying an intent
@@ -115,6 +122,7 @@ type IntentStatus struct {
 	IsWinner      bool      `json:"isWinner"`
 	Deposited     bool      `json:"deposited"`
 	Completed     bool      `json:"completed"`
+	DepositTxHash string    `json:"depositTxHash,omitempty"` // Transaction hash of deposit on source chain
 	LastUpdated   time.Time `json:"lastUpdated"`
 }
 
@@ -191,4 +199,25 @@ type GetRoutesResponse struct {
 	Routes  []Route      `json:"routes"`
 	Solvers []SolverInfo `json:"solvers"`
 	Error   string       `json:"error,omitempty"`
+}
+
+// IntentDetails stores complete intent information including transaction hashes
+type IntentDetails struct {
+	IntentID         string    `json:"intentId"`
+	SourceChainID    string    `json:"sourceChainId"`
+	DestChainID      string    `json:"destChainId"`
+	SolverAddress    string    `json:"solverAddress"`
+	DepositTxHash    string    `json:"depositTxHash,omitempty"`
+	SolveTxHash      string    `json:"solveTxHash,omitempty"`
+	SettleTxHash     string    `json:"settleTxHash,omitempty"`
+	Status           string    `json:"status"`           // "pending", "solving", "settled", "completed"
+	Timestamp        time.Time `json:"timestamp"`
+	SettledAt        time.Time `json:"settledAt,omitempty"`
+}
+
+// GetIntentDetailsResponse is the response for intent details query
+type GetIntentDetailsResponse struct {
+	Success bool           `json:"success"`
+	Intent  *IntentDetails `json:"intent,omitempty"`
+	Error   string         `json:"error,omitempty"`
 }

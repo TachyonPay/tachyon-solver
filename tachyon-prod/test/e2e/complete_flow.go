@@ -70,7 +70,7 @@ func loadConfig() (*TestConfig, error) {
 		BridgeBaseAddr:    os.Getenv("CHAIN_2_BRIDGE"),
 		BridgeSepoliaAddr: os.Getenv("CHAIN_3_BRIDGE"),
 		PrivateKey:        os.Getenv("PRIVATE_KEY"),
-		RelayerURL:        getEnvOrDefault("RELAYER_URL", "http://localhost:3000"),
+		RelayerURL:        getEnvOrDefault("RELAYER_URL", "http://65.0.45.215:3000"),
 		AuctionDuration:   100, // 40 seconds for solver to process
 	}, nil
 }

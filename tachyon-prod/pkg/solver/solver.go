@@ -845,15 +845,22 @@ func (s *Solver) handleAuctionWon(ctx context.Context, networkKey string, intent
 		return
 	}
 
+	depositTxHash := tx.Hash().Hex()
 	key := fmt.Sprintf("%s-%s", networkKey, intentID.String())
 	s.mu.Lock()
 	if status, ok := s.activeIntents[key]; ok {
 		status.IsWinner = true
 		status.Deposited = true
 		status.Status = "deposited"
+		status.DepositTxHash = depositTxHash
 		status.LastUpdated = time.Now()
 	}
 	s.mu.Unlock()
+
+	log.WithFields(log.Fields{
+		"intentID":      intentID,
+		"depositTxHash": depositTxHash,
+	}).Info("Deposit confirmed and tx hash stored")
 
 	go s.solveIntentOnDestinationChain(ctx, networkKey, intentID)
 }
@@ -1006,13 +1013,23 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 		return
 	}
 
+	solveTxHash := tx.Hash().Hex()
 	log.WithFields(log.Fields{
 		"intentID":    intentID,
 		"destNetwork": destNetwork,
-		"txHash":      tx.Hash().Hex(),
+		"txHash":      solveTxHash,
 	}).Info("Intent solved on destination chain and confirmed")
 
-	go s.settleIntent(ctx, sourceNetwork, intentID, intentID, destClient.GetAddress())
+	// Get deposit tx hash from the intent status
+	key := fmt.Sprintf("%s-%s", sourceNetwork, intentID.String())
+	s.mu.RLock()
+	var depositTxHash string
+	if status, ok := s.activeIntents[key]; ok {
+		depositTxHash = status.DepositTxHash
+	}
+	s.mu.RUnlock()
+
+	go s.settleIntent(ctx, sourceNetwork, intentID, intentID, destClient.GetAddress(), depositTxHash, solveTxHash)
 }
 
 // getRecipientsFromRelayer fetches recipient information from the relayer.
@@ -1067,14 +1084,22 @@ func (s *Solver) getRecipientsFromRelayer(intentID string, sourceChainID string)
 
 // settleIntent calls the relayer to settle an intent on the source chain
 // Retries with exponential backoff to handle RPC propagation delays on slow chains like Sepolia
-func (s *Solver) settleIntent(ctx context.Context, network string, chain1IntentID, chain2IntentID *big.Int, solverAddr common.Address) {
+func (s *Solver) settleIntent(ctx context.Context, network string, chain1IntentID, chain2IntentID *big.Int, solverAddr common.Address, depositTxHash, solveTxHash string) {
 	settleReq := types.SettleRequest{
 		IntentID:         chain1IntentID.String(),
 		Network:          network,
 		Chain2IntentID:   chain2IntentID.String(),
 		SolverAddress:    solverAddr.Hex(),
 		DestinationChain: "base",
+		DepositTxHash:    depositTxHash,
+		SolveTxHash:      solveTxHash,
 	}
+
+	log.WithFields(log.Fields{
+		"intentID":      chain1IntentID,
+		"depositTxHash": depositTxHash,
+		"solveTxHash":   solveTxHash,
+	}).Info("Sending settle request with transaction hashes")
 
 	body, err := json.Marshal(settleReq)
 	if err != nil {

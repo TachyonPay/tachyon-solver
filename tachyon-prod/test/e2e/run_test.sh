@@ -27,27 +27,30 @@ fi
 
 echo -e "${GREEN}✅ Found .env.test configuration${NC}"
 
+# Load environment variables and export them
+set -a  # automatically export all variables
+source .env.test
+set +a  # stop automatically exporting
+
 # Check if services are running
 echo ""
 echo "🏥 Checking service health..."
 
-# Check Relayer
-if curl -s http://localhost:3000/health > /dev/null 2>&1; then
-    echo -e "${GREEN}✅ Relayer service is running${NC}"
+# Check Relayer (use RELAYER_URL from .env.test or default to remote)
+RELAYER_URL=${RELAYER_URL:-"http://65.0.45.215:3000"}
+if curl -s ${RELAYER_URL}/health > /dev/null 2>&1; then
+    echo -e "${GREEN}✅ Relayer service is running at ${RELAYER_URL}${NC}"
 else
-    echo -e "${RED}❌ Relayer service is not responding${NC}"
-    echo "Please start the relayer service:"
-    echo "  cd ../../"
-    echo "  ./bin/relayer"
+    echo -e "${RED}❌ Relayer service is not responding at ${RELAYER_URL}${NC}"
+    echo "Please check if the relayer service is running"
     exit 1
 fi
 
-# Check Solver
-if curl -s http://localhost:3001/health > /dev/null 2>&1; then
-    echo -e "${GREEN}✅ Solver service is running${NC}"
+# Check Solver (optional - runs on remote server)
+if curl -s http://65.0.45.215:3001/health > /dev/null 2>&1; then
+    echo -e "${GREEN}✅ Solver service is running at 65.0.45.215:3001${NC}"
 else
-    echo -e "${YELLOW}⚠️  Solver service is not responding${NC}"
-    echo "Note: Tests can run without solver, but may not be complete"
+    echo -e "${YELLOW}⚠️  Solver service is not responding (tests will create intents but solver may not process them)${NC}"
 fi
 
 echo ""

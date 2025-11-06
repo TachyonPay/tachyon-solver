@@ -24,6 +24,7 @@ func (api *RelayerAPI) RegisterRoutes(r *gin.Engine) {
 	r.GET("/ecies-pubkey", api.GetECIESPublicKey)
 	r.POST("/store-recipients", api.StoreRecipients)
 	r.GET("/get-recipients/:intentId", api.GetRecipients)
+	r.GET("/intent-details/:intentId", api.GetIntentDetails)
 	r.GET("/list-stored-intents", api.ListStoredIntents)
 	r.DELETE("/delete-recipients/:intentId", api.DeleteRecipients)
 	r.POST("/verify", api.VerifyIntent)
@@ -250,4 +251,32 @@ func (api *RelayerAPI) GetRoutesQuery(c *gin.Context) {
 
 	response := api.relayer.GetRoutes(&filter)
 	c.JSON(http.StatusOK, response)
+}
+
+// GetIntentDetails retrieves complete intent details including all transaction hashes
+func (api *RelayerAPI) GetIntentDetails(c *gin.Context) {
+	intentID := c.Param("intentId")
+	sourceChainID := c.Query("sourceChainId")
+
+	if sourceChainID == "" {
+		c.JSON(http.StatusBadRequest, types.GetIntentDetailsResponse{
+			Success: false,
+			Error:   "sourceChainId query parameter is required",
+		})
+		return
+	}
+
+	details, err := api.relayer.GetIntentDetails(sourceChainID, intentID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, types.GetIntentDetailsResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, types.GetIntentDetailsResponse{
+		Success: true,
+		Intent:  details,
+	})
 }
