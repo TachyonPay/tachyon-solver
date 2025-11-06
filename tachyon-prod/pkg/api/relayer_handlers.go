@@ -86,6 +86,7 @@ func (api *RelayerAPI) StoreRecipients(c *gin.Context) {
 // GetRecipients retrieves recipient information for the winning solver only
 func (api *RelayerAPI) GetRecipients(c *gin.Context) {
 	intentID := c.Param("intentId")
+	sourceChainID := c.Query("sourceChainId") // Optional: for disambiguation when same intent ID exists on multiple chains
 
 	requesterAddr := c.GetHeader("X-Solver-Address")
 	if requesterAddr == "" {
@@ -96,7 +97,7 @@ func (api *RelayerAPI) GetRecipients(c *gin.Context) {
 		return
 	}
 
-	info, err := api.relayer.GetRecipientsForWinner(c.Request.Context(), intentID, requesterAddr)
+	info, err := api.relayer.GetRecipientsForWinner(c.Request.Context(), intentID, sourceChainID, requesterAddr)
 	if err != nil {
 		c.JSON(http.StatusForbidden, gin.H{
 			"success": false,
@@ -147,7 +148,7 @@ func (api *RelayerAPI) VerifyIntent(c *gin.Context) {
 		return
 	}
 
-	solved, err := api.relayer.VerifyIntentSolved(c.Request.Context(), req.Network, req.IntentID)
+	solved, err := api.relayer.VerifyIntentSolved(c.Request.Context(), req.Network, req.SourceChainID, req.IntentID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,

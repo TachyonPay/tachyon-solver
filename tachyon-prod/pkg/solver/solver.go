@@ -912,7 +912,7 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 			time.Sleep(backoff)
 		}
 
-		recipients, amounts, recipientsErr = s.getRecipientsFromRelayer(intentID.String())
+		recipients, amounts, recipientsErr = s.getRecipientsFromRelayer(intentID.String(), sourceChainCfg.ChainID.String())
 		if recipientsErr == nil {
 			break
 		}
@@ -978,9 +978,10 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 
 	userAddr := common.HexToAddress(intent.User)
 	expectedAmountB := intent.ExpectedAmountB
+	sourceChainID := sourceChainCfg.ChainID
 
 	tx, err := s.retryTransaction(ctx, destNetwork, "solve-intent", func() (*ethtypes.Transaction, error) {
-		return destClient.SolveIntentOnChain2(ctx, intentID, userAddr, tokenBAddr, expectedAmountB, recipientAddrs, amountBigInts)
+		return destClient.SolveIntentOnChain2(ctx, sourceChainID, intentID, userAddr, tokenBAddr, expectedAmountB, recipientAddrs, amountBigInts)
 	})
 	if err != nil {
 		log.WithError(err).Error("Failed to solve intent on chain2 after retries")
@@ -1004,8 +1005,9 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 
 // getRecipientsFromRelayer fetches recipient information from the relayer.
 // Includes solver address in request header for authorization.
-func (s *Solver) getRecipientsFromRelayer(intentID string) ([]string, []string, error) {
-	url := fmt.Sprintf("%s/get-recipients/%s", s.cfg.RelayerURL, intentID)
+// sourceChainID helps disambiguate when the same intent ID exists on multiple chains.
+func (s *Solver) getRecipientsFromRelayer(intentID string, sourceChainID string) ([]string, []string, error) {
+	url := fmt.Sprintf("%s/get-recipients/%s?sourceChainId=%s", s.cfg.RelayerURL, intentID, sourceChainID)
 
 	var solverAddr string
 	for _, client := range s.clients {

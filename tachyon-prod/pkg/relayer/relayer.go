@@ -185,7 +185,8 @@ func (r *Relayer) GetRecipients(intentID string) (*types.RecipientInfo, error) {
 // GetRecipientsForWinner retrieves recipients only if the requester is the winning solver.
 // Verifies that the solver has deposited before granting access to recipient information.
 // Includes retry logic for RPC propagation delays on slow chains like Base and Sepolia.
-func (r *Relayer) GetRecipientsForWinner(ctx context.Context, intentID string, requesterAddr string) (*types.RecipientInfo, error) {
+// If sourceChainIDStr is provided, it will be used to directly lookup the correct intent.
+func (r *Relayer) GetRecipientsForWinner(ctx context.Context, intentID string, sourceChainIDStr string, requesterAddr string) (*types.RecipientInfo, error) {
 	intentIDBig, ok := new(big.Int).SetString(intentID, 10)
 	if !ok {
 		return nil, fmt.Errorf("invalid intent ID")
@@ -202,36 +203,71 @@ func (r *Relayer) GetRecipientsForWinner(ctx context.Context, intentID string, r
 	// the requester is the winning solver. This is critical for cross-chain systems.
 	requesterAddress := common.HexToAddress(requesterAddr)
 
-	for networkKey, client := range r.clients {
-		tempIntent, err := client.GetIntent(ctx, intentIDBig)
-		if err == nil && tempIntent.User != "" {
-			// Check if this is the right intent by verifying the winner matches the requester
-			winningAddress := common.HexToAddress(tempIntent.WinningSolver)
-
-			if winningAddress == requesterAddress {
-				// Found the correct intent on this chain
-				intent = tempIntent
-				sourceChainID = r.cfg.Chains[networkKey].ChainID.Int64()
-				sourceNetworkKey = networkKey
-				intentErr = nil
-				log.WithFields(log.Fields{
-					"intentID":       intentID,
-					"network":        networkKey,
-					"sourceChainID":  sourceChainID,
-					"winningSolver":  tempIntent.WinningSolver,
-				}).Debug("Found correct intent on source chain")
-				break
-			} else {
-				log.WithFields(log.Fields{
-					"intentID":      intentID,
-					"network":       networkKey,
-					"winningSolver": tempIntent.WinningSolver,
-					"requester":     requesterAddr,
-				}).Debug("Found intent with same ID but different winner, skipping")
+	// If source chain ID is provided, use it directly for faster lookup
+	if sourceChainIDStr != "" {
+		sourceChainIDBig, ok := new(big.Int).SetString(sourceChainIDStr, 10)
+		if ok {
+			// Find the network key for this chain ID
+			for networkKey, cfg := range r.cfg.Chains {
+				if cfg.ChainID.Cmp(sourceChainIDBig) == 0 {
+					client, exists := r.clients[networkKey]
+					if exists {
+						tempIntent, err := client.GetIntent(ctx, intentIDBig)
+						if err == nil && tempIntent.User != "" {
+							// Verify the winner matches
+							winningAddress := common.HexToAddress(tempIntent.WinningSolver)
+							if winningAddress == requesterAddress {
+								intent = tempIntent
+								sourceChainID = sourceChainIDBig.Int64()
+								sourceNetworkKey = networkKey
+								log.WithFields(log.Fields{
+									"intentID":      intentID,
+									"sourceChainID": sourceChainID,
+									"network":       networkKey,
+								}).Debug("Found intent using provided source chain ID")
+								break
+							}
+						}
+					}
+					break
+				}
 			}
 		}
-		if err != nil {
-			intentErr = err
+	}
+
+	// If not found with provided chain ID (or chain ID not provided), search all chains
+	if intent == nil {
+		for networkKey, client := range r.clients {
+			tempIntent, err := client.GetIntent(ctx, intentIDBig)
+			if err == nil && tempIntent.User != "" {
+				// Check if this is the right intent by verifying the winner matches the requester
+				winningAddress := common.HexToAddress(tempIntent.WinningSolver)
+
+				if winningAddress == requesterAddress {
+					// Found the correct intent on this chain
+					intent = tempIntent
+					sourceChainID = r.cfg.Chains[networkKey].ChainID.Int64()
+					sourceNetworkKey = networkKey
+					intentErr = nil
+					log.WithFields(log.Fields{
+						"intentID":       intentID,
+						"network":        networkKey,
+						"sourceChainID":  sourceChainID,
+						"winningSolver":  tempIntent.WinningSolver,
+					}).Debug("Found correct intent on source chain")
+					break
+				} else {
+					log.WithFields(log.Fields{
+						"intentID":      intentID,
+						"network":       networkKey,
+						"winningSolver": tempIntent.WinningSolver,
+						"requester":     requesterAddr,
+					}).Debug("Found intent with same ID but different winner, skipping")
+				}
+			}
+			if err != nil {
+				intentErr = err
+			}
 		}
 	}
 
@@ -365,10 +401,17 @@ func (r *Relayer) DeleteRecipients(intentID string) error {
 }
 
 // VerifyIntentSolved verifies if an intent has been solved on the destination chain
-func (r *Relayer) VerifyIntentSolved(ctx context.Context, network string, intentID string) (bool, error) {
+// The network parameter is the destination chain where the intent was solved
+// The sourceChainID parameter is the chain ID where the intent was originally created
+func (r *Relayer) VerifyIntentSolved(ctx context.Context, network string, sourceChainID string, intentID string) (bool, error) {
 	client, ok := r.clients[network]
 	if !ok {
 		return false, fmt.Errorf("network %s not found", network)
+	}
+
+	sourceChainIDBig, ok := new(big.Int).SetString(sourceChainID, 10)
+	if !ok {
+		return false, fmt.Errorf("invalid source chain ID: %s", sourceChainID)
 	}
 
 	intentIDBig, ok := new(big.Int).SetString(intentID, 10)
@@ -376,7 +419,7 @@ func (r *Relayer) VerifyIntentSolved(ctx context.Context, network string, intent
 		return false, fmt.Errorf("invalid intent ID: %s", intentID)
 	}
 
-	solved, err := client.VerifyIntentSolved(ctx, intentIDBig)
+	solved, err := client.VerifyIntentSolved(ctx, sourceChainIDBig, intentIDBig)
 	if err != nil {
 		return false, fmt.Errorf("failed to verify intent: %w", err)
 	}
@@ -449,7 +492,7 @@ func (r *Relayer) SettleIntent(ctx context.Context, req *types.SettleRequest) (*
 			time.Sleep(backoff)
 		}
 
-		solved, verifyErr = r.VerifyIntentSolved(ctx, destNetwork, req.Chain2IntentID)
+		solved, verifyErr = r.VerifyIntentSolved(ctx, destNetwork, req.Network, req.Chain2IntentID)
 		if verifyErr != nil {
 			log.WithFields(log.Fields{
 				"attempt": i + 1,

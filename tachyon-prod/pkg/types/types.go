@@ -100,8 +100,9 @@ type SettleRequest struct {
 
 // VerifyRequest is the request body for verifying an intent
 type VerifyRequest struct {
-	IntentID string `json:"intentId" binding:"required"`
-	Network  string `json:"network" binding:"required"`
+	IntentID      string `json:"intentId" binding:"required"`
+	Network       string `json:"network" binding:"required"`       // Destination chain where intent was solved
+	SourceChainID string `json:"sourceChainId" binding:"required"` // Source chain where intent was created
 }
 
 // IntentStatus represents the tracking status of an intent in the solver

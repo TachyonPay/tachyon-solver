@@ -35,9 +35,10 @@ contract BridgeIntent is ReentrancyGuard, Ownable {
     mapping(uint256 => Bid[]) public intentBids;
     mapping(uint256 => mapping(address => uint256)) public solverBids;
     mapping(address => bool) public authorizedRelayers;
-    
-    // Chain2 tracking for solved intents - using simple intent IDs
-    mapping(uint256 => bool) public solvedIntents;
+
+    // Chain2 tracking for solved intents - using composite key (sourceChainId-intentId)
+    // This prevents collisions when same intent ID exists on multiple chains
+    mapping(bytes32 => bool) public solvedIntents;
     
     uint256 public nextIntentId = 1;
     uint256 public chainId;
@@ -342,6 +343,7 @@ contract BridgeIntent is ReentrancyGuard, Ownable {
      * @param _amounts Array of amounts corresponding to recipients
      */
     function solveIntentOnChain2(
+        uint256 _sourceChainId,
         uint256 _intentId,
         address _user,
         address _tokenB,
@@ -349,13 +351,17 @@ contract BridgeIntent is ReentrancyGuard, Ownable {
         address[] calldata _recipients,
         uint256[] calldata _amounts
     ) external nonReentrant {
+        require(_sourceChainId > 0, "Invalid source chain ID");
         require(_intentId > 0, "Invalid intent ID");
         require(_user != address(0), "Invalid user address");
         require(_tokenB != address(0), "Invalid token address");
         require(_expectedAmountB > 0, "Invalid expected amount");
         require(_recipients.length == _amounts.length, "Arrays length mismatch");
         require(_recipients.length > 0, "Empty recipients array");
-        require(!solvedIntents[_intentId], "Intent already solved");
+
+        // Create composite key: keccak256(sourceChainId, intentId)
+        bytes32 intentKey = keccak256(abi.encodePacked(_sourceChainId, _intentId));
+        require(!solvedIntents[intentKey], "Intent already solved");
 
         uint256 totalAmount = 0;
         for (uint256 i = 0; i < _amounts.length; i++) {
@@ -373,8 +379,8 @@ contract BridgeIntent is ReentrancyGuard, Ownable {
             }
         }
 
-        // Mark intent as solved
-        solvedIntents[_intentId] = true;
+        // Mark intent as solved using composite key
+        solvedIntents[intentKey] = true;
 
         emit IntentSolvedOnChain2(_intentId, msg.sender, _tokenB, totalAmount);
         emit IntentCompleted(_intentId, msg.sender);
@@ -382,11 +388,13 @@ contract BridgeIntent is ReentrancyGuard, Ownable {
 
     /**
      * @dev Check if intent is solved on chain2
+     * @param _sourceChainId Source chain ID where intent was created
      * @param _intentId Intent ID to check
      * @return True if intent is solved
      */
-    function isIntentSolvedOnChain2(uint256 _intentId) external view returns (bool) {
-        return solvedIntents[_intentId];
+    function isIntentSolvedOnChain2(uint256 _sourceChainId, uint256 _intentId) external view returns (bool) {
+        bytes32 intentKey = keccak256(abi.encodePacked(_sourceChainId, _intentId));
+        return solvedIntents[intentKey];
     }
 
     /**
