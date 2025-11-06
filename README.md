@@ -123,19 +123,11 @@ The relayer operates within a **Trusted Execution Environment (TEE)** to ensure 
 ## 🏃‍♂️ How It Works
 
 ### 1. Intent Creation with Anonymous Addresses
-```typescript
-// User creates intent with anonymous recipient addresses
-const intent = {
-  tokenA: "0x...", // Token on Horizen
-  tokenB: "0x...", // Token on Base  
-  amount: "1000",
-  anonymousRecipients: [
-    "0xAnon1...", // Generated anonymously by user
-    "0xAnon2...", // Stored securely in TEE
-  ],
-  amounts: ["500", "500"]
-};
-```
+Users create intents specifying:
+- Token A (on origin chain) and Token B (on destination chain)
+- Amount to bridge
+- Anonymous recipient addresses (generated client-side)
+- Distribution amounts across recipients
 
 ### 2. TEE Secure Storage
 The relayer's TEE enclave securely stores the mapping:
@@ -145,59 +137,29 @@ Intent ID → Anonymous Recipients (encrypted in TEE)
 
 ### 3. Solver Competition & Execution
 - Solvers compete in auctions to fulfill intents
-- Winning solver deposits tokens and solves the intent on Chain2
-- Funds are distributed to anonymous addresses, breaking user links
+- Winning solver deposits tokens and solves the intent on destination chain
+- Funds are distributed to anonymous addresses, breaking user identity links
 
 ### 4. zkVerify Proof & Settlement
-```typescript
-// Light client generates proof of Chain2 completion
-const proof = lightClient.generateProof(chain2Transaction);
-
-// Relayer submits to zkVerify for verification
-const verifyResponse = await zkVerify.verify(proof);
-
-if (verifyResponse.status === 'Finalized') {
-  // Use settle-with-proof endpoint for cryptographically verified settlement
-  await relayer.settleWithProof({
-    intentId,
-    chain2IntentId,
-    originChainId,
-    destinationChainId,
-    solverAddress,
-    proofData: proof
-  });
-}
-```
+1. Light client generates proof of transaction completion on destination chain
+2. Relayer submits proof to zkVerify for verification
+3. Once proof is finalized, settlement is authorized on origin chain
+4. Solver receives escrowed funds after cryptographic verification
 
 ## 🛠️ Technical Implementation
 
-### TEE Relayer Components
-- **Secure Enclave**: Runs relayer logic in isolated, attestable environment
-- **Anonymous Storage**: Encrypted storage of recipient mappings within TEE
+### Solver and Relayer (Rust/Go Implementation)
+
+The production solver and relayer are implemented in Rust/Go in the `tachyon-prod/` directory for optimal performance and security.
+
+#### Key Components:
+- **Multi-Chain Support**: Operates across Horizen and Base networks
+- **Auction Participation**: Competitive bidding for profitable intents
+- **Cross-Chain Execution**: Handles token approvals, deposits, and distributions
+- **TEE Integration**: Secure enclave for anonymous address management
 - **Light Client**: Generates zero-knowledge proofs of cross-chain transactions
 - **zkVerify Interface**: Submits and verifies proofs through zkVerify
-- **Settle-with-Proof Endpoint**: Ensures cryptographic verification before settlement
-
-### Relayer zkVerify Integration
-
-The relayer implements a comprehensive proof verification system:
-
-#### `/settle-with-proof` Endpoint
-```typescript
-POST /settle-with-proof
-{
-  "intentId": "123",
-  "chain2IntentId": "123", 
-  "originChainId": 845320009,
-  "destinationChainId": 84532,
-  "solverAddress": "0x...",
-  "proofData": {
-    "proof": "0x...",
-    "publicSignals": ["..."],
-    "vk": "0x..."
-  }
-}
-```
+- **Settlement with Proofs**: Cryptographic verification before settlement
 
 #### Proof Verification Flow
 1. **Proof Submission**: SP1 proof submitted to zkVerify API
@@ -205,40 +167,17 @@ POST /settle-with-proof
 3. **Finalization Polling**: Relayer polls zkVerify until proof is finalized on-chain
 4. **Settlement Authorization**: Only finalized proofs authorize settlement transactions
 
-#### zkVerify API Integration
-```typescript
-// Submit proof to zkVerify
-const submitResponse = await axios.post(`${ZKV_API_URL}/submit-proof/${API_KEY}`, {
-  proofType: "sp1",
-  vkRegistered: false,
-  proofData: {
-    proof: proofData.proof,
-    publicSignals: proofData.publicSignals, 
-    vk: proofData.vk
-  }
-});
-
-// Poll for finalization
-const jobId = submitResponse.data.jobId;
-while (status !== "Finalized") {
-  const statusResponse = await axios.get(`${ZKV_API_URL}/job-status/${API_KEY}/${jobId}`);
-  status = statusResponse.data.status;
-  await sleep(5000);
-}
-```
-
-### Solver Architecture
-- **Multi-Chain Support**: Operates across Horizen and Base networks
-- **Auction Participation**: Competitive bidding for profitable intents
-- **Cross-Chain Execution**: Handles token approvals, deposits, and distributions
+See `tachyon-prod/README.md` for detailed setup and configuration instructions.
 
 ## 🔧 Setup & Configuration
 
 ### Prerequisites
-- Node.js 18+
+- Rust (for solver/relayer)
+- Go (for relayer components)
+- Node.js 18+ (for contract deployment)
 - Private keys for solver wallets on both chains
 - Access to zkVerify API
-- TEE-enabled hardware for relayer
+- TEE-enabled hardware for relayer (optional)
 
 ### Environment Variables
 ```bash
@@ -262,36 +201,22 @@ ZKVERIFY_API_URL=https://zkverify.api.url
 ```
 
 ### Installation & Running
+
+#### Deploy Smart Contracts
 ```bash
-# Install dependencies
+# Install hardhat dependencies
 npm install
 
-# Start the solver
-npm run start
+# Deploy contracts
+npx hardhat run scripts/deploy.ts --network horizen_testnet
+npx hardhat run scripts/deploy.ts --network base_sepolia
 
-# Check solver status
-curl http://localhost:3001/status
-
-# View active intents
-curl http://localhost:3001/active-intents
+# Mint test tokens (optional)
+npx hardhat run scripts/mintTokens.ts --network horizen_testnet
 ```
 
-## 🔍 API Endpoints
-
-### Solver Status
-```
-GET /health - Health check
-GET /status - Detailed solver status
-GET /active-intents - Current active intents
-```
-
-### Intent Management
-```
-GET /intent-status/:intentId/:network - Check specific intent status
-POST /finalize-auction/:intentId - Manually finalize auction
-POST /start - Start solver
-POST /stop - Stop solver
-```
+#### Run Solver & Relayer
+See [tachyon-prod/README.md](tachyon-prod/README.md) for detailed instructions on building and running the Rust/Go implementation.
 
 ## 🔒 Security Considerations
 
