@@ -281,11 +281,28 @@ func (r *Relayer) SettleIntent(ctx context.Context, req *types.SettleRequest) (*
 		}, nil
 	}
 
+	// Read the intent from source chain to get the actual destination chain ID
+	intent, err := client.GetIntent(ctx, chain1IntentID)
+	if err != nil {
+		return &types.RelayerResponse{
+			Success: false,
+			Error:   fmt.Sprintf("failed to read intent from source chain: %v", err),
+		}, nil
+	}
 
-	destNetwork := r.getDestinationNetwork(req.Network)
+	// Use the intent's destChainId to find the correct destination network
+	destChainIDStr := intent.DestChainId.String()
+	destNetwork := destChainIDStr
+
+	log.WithFields(log.Fields{
+		"sourceNetwork": req.Network,
+		"destNetwork":   destNetwork,
+		"destChainID":   destChainIDStr,
+		"intentID":      req.IntentID,
+	}).Info("Settling intent with correct destination chain")
 
 	var solved bool
-	var err error
+	var verifyErr error
 	// Increase retries for slow RPC propagation on Sepolia and Base
 	maxRetries := 10
 	for i := 0; i < maxRetries; i++ {
@@ -301,11 +318,11 @@ func (r *Relayer) SettleIntent(ctx context.Context, req *types.SettleRequest) (*
 			time.Sleep(backoff)
 		}
 
-		solved, err = r.VerifyIntentSolved(ctx, destNetwork, req.Chain2IntentID)
-		if err != nil {
+		solved, verifyErr = r.VerifyIntentSolved(ctx, destNetwork, req.Chain2IntentID)
+		if verifyErr != nil {
 			log.WithFields(log.Fields{
 				"attempt": i + 1,
-				"error": err.Error(),
+				"error": verifyErr.Error(),
 			}).Warn("Verification attempt failed")
 			continue
 		}
@@ -324,11 +341,11 @@ func (r *Relayer) SettleIntent(ctx context.Context, req *types.SettleRequest) (*
 		}).Debug("Intent not solved yet, will retry")
 	}
 
-	if err != nil {
-		log.WithError(err).Error("Failed to verify intent solved after retries")
+	if verifyErr != nil {
+		log.WithError(verifyErr).Error("Failed to verify intent solved after retries")
 		return &types.RelayerResponse{
 			Success: false,
-			Error:   fmt.Sprintf("verification failed: %v", err),
+			Error:   fmt.Sprintf("verification failed: %v", verifyErr),
 		}, nil
 	}
 
