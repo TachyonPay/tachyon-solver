@@ -2,12 +2,15 @@ package relayer
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"strings"
 	"sync"
 	"time"
 
+	ecies "github.com/ecies/go/v2"
 	"github.com/ethereum/go-ethereum/common"
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	log "github.com/sirupsen/logrus"
@@ -60,18 +63,68 @@ func NewRelayer(cfg *config.Config) (*Relayer, error) {
 	}, nil
 }
 
+// GetECIESPublicKey returns the ECIES public key for encrypting recipient information
+func (r *Relayer) GetECIESPublicKey() string {
+	pubKeyBytes := r.cfg.ECIESPublicKey.Bytes(false) // uncompressed format
+	return hex.EncodeToString(pubKeyBytes)
+}
+
 // StoreRecipients stores recipient information for an intent (simulates TEE)
 // Uses composite key (sourceChainID-intentID) to handle same intent IDs across different chains
+// Now accepts encrypted recipient data which is decrypted before storage
 func (r *Relayer) StoreRecipients(req *types.StoreRecipientsRequest) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if len(req.Recipients) != len(req.Amounts) {
+	var recipients []string
+	var amounts []string
+
+	// Check if encrypted data is provided (new format)
+	if req.EncryptedData != "" {
+		// Decrypt the encrypted data
+		encryptedBytes, err := hex.DecodeString(req.EncryptedData)
+		if err != nil {
+			return fmt.Errorf("invalid encrypted data hex: %w", err)
+		}
+
+		decryptedBytes, err := ecies.Decrypt(r.cfg.ECIESPrivateKey, encryptedBytes)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt recipient data: %w", err)
+		}
+
+		// Parse the decrypted JSON
+		var decryptedData struct {
+			Recipients []string `json:"recipients"`
+			Amounts    []string `json:"amounts"`
+		}
+		if err := json.Unmarshal(decryptedBytes, &decryptedData); err != nil {
+			return fmt.Errorf("invalid decrypted data format: %w", err)
+		}
+
+		recipients = decryptedData.Recipients
+		amounts = decryptedData.Amounts
+
+		log.WithFields(log.Fields{
+			"intentID": req.IntentID,
+			"encrypted": true,
+		}).Info("Successfully decrypted recipient information")
+	} else {
+		// Legacy unencrypted format (backward compatibility)
+		recipients = req.Recipients
+		amounts = req.Amounts
+
+		log.WithFields(log.Fields{
+			"intentID": req.IntentID,
+			"encrypted": false,
+		}).Warn("Received unencrypted recipient data - consider using encrypted format")
+	}
+
+	if len(recipients) != len(amounts) {
 		return fmt.Errorf("recipients and amounts length mismatch")
 	}
 
 	totalAmount := big.NewInt(0)
-	for _, amountStr := range req.Amounts {
+	for _, amountStr := range amounts {
 		amount, ok := new(big.Int).SetString(amountStr, 10)
 		if !ok {
 			return fmt.Errorf("invalid amount: %s", amountStr)
@@ -98,8 +151,8 @@ func (r *Relayer) StoreRecipients(req *types.StoreRecipientsRequest) error {
 	r.recipientStore[storeKey] = &types.RecipientInfo{
 		Success:     true,
 		IntentID:    req.IntentID,
-		Recipients:  req.Recipients,
-		Amounts:     req.Amounts,
+		Recipients:  recipients,
+		Amounts:     amounts,
 		Timestamp:   time.Now().Unix(),
 		ChainID:     req.ChainID,
 		TotalAmount: totalAmount.String(),
@@ -131,6 +184,7 @@ func (r *Relayer) GetRecipients(intentID string) (*types.RecipientInfo, error) {
 
 // GetRecipientsForWinner retrieves recipients only if the requester is the winning solver.
 // Verifies that the solver has deposited before granting access to recipient information.
+// Includes retry logic for RPC propagation delays on slow chains like Base and Sepolia.
 func (r *Relayer) GetRecipientsForWinner(ctx context.Context, intentID string, requesterAddr string) (*types.RecipientInfo, error) {
 	intentIDBig, ok := new(big.Int).SetString(intentID, 10)
 	if !ok {
@@ -141,21 +195,40 @@ func (r *Relayer) GetRecipientsForWinner(ctx context.Context, intentID string, r
 	// to find where this intent was created and verify the winning solver
 	var intent *types.Intent
 	var sourceChainID int64
+	var sourceNetworkKey string
 	var intentErr error
+
+	// When multiple chains have the same intent ID, we need to find the one where
+	// the requester is the winning solver. This is critical for cross-chain systems.
+	requesterAddress := common.HexToAddress(requesterAddr)
 
 	for networkKey, client := range r.clients {
 		tempIntent, err := client.GetIntent(ctx, intentIDBig)
 		if err == nil && tempIntent.User != "" {
-			// Found the intent on this chain
-			intent = tempIntent
-			sourceChainID = r.cfg.Chains[networkKey].ChainID.Int64()
-			intentErr = nil
-			log.WithFields(log.Fields{
-				"intentID":      intentID,
-				"network":       networkKey,
-				"sourceChainID": sourceChainID,
-			}).Debug("Found intent on source chain")
-			break
+			// Check if this is the right intent by verifying the winner matches the requester
+			winningAddress := common.HexToAddress(tempIntent.WinningSolver)
+
+			if winningAddress == requesterAddress {
+				// Found the correct intent on this chain
+				intent = tempIntent
+				sourceChainID = r.cfg.Chains[networkKey].ChainID.Int64()
+				sourceNetworkKey = networkKey
+				intentErr = nil
+				log.WithFields(log.Fields{
+					"intentID":       intentID,
+					"network":        networkKey,
+					"sourceChainID":  sourceChainID,
+					"winningSolver":  tempIntent.WinningSolver,
+				}).Debug("Found correct intent on source chain")
+				break
+			} else {
+				log.WithFields(log.Fields{
+					"intentID":      intentID,
+					"network":       networkKey,
+					"winningSolver": tempIntent.WinningSolver,
+					"requester":     requesterAddr,
+				}).Debug("Found intent with same ID but different winner, skipping")
+			}
 		}
 		if err != nil {
 			intentErr = err
@@ -169,14 +242,72 @@ func (r *Relayer) GetRecipientsForWinner(ctx context.Context, intentID string, r
 		return nil, fmt.Errorf("intent %s not found on any chain", intentID)
 	}
 
+	// If deposit not yet visible, retry a few times to handle RPC propagation delays
+	// This is critical for Base and Sepolia which have very slow state propagation (2+ minutes)
 	if !intent.Deposited {
-		log.WithField("intentID", intentID).Warn("Intent not deposited yet")
-		return nil, fmt.Errorf("intent not deposited yet - solver must deposit first")
+		maxRetries := 15
+		client := r.clients[sourceNetworkKey]
+
+		log.WithFields(log.Fields{
+			"intentID":  intentID,
+			"network":   sourceNetworkKey,
+			"deposited": intent.Deposited,
+		}).Info("Deposit not visible yet, starting retry loop")
+
+		for i := 0; i < maxRetries; i++ {
+			// Exponential backoff with cap: 3s, 6s, 9s, 12s, 15s, 15s, 15s...
+			backoff := time.Duration(i+1) * 3 * time.Second
+			if backoff > 15*time.Second {
+				backoff = 15 * time.Second
+			}
+
+			log.WithFields(log.Fields{
+				"intentID": intentID,
+				"attempt":  i + 1,
+				"network":  sourceNetworkKey,
+				"backoff":  backoff,
+			}).Info("Waiting for deposit to become visible")
+			time.Sleep(backoff)
+
+			freshIntent, err := client.GetIntent(ctx, intentIDBig)
+			if err != nil {
+				log.WithFields(log.Fields{
+					"intentID": intentID,
+					"attempt":  i + 1,
+					"error":    err.Error(),
+				}).Warn("Failed to re-fetch intent")
+				continue
+			}
+
+			log.WithFields(log.Fields{
+				"intentID":  intentID,
+				"attempt":   i + 1,
+				"deposited": freshIntent.Deposited,
+			}).Debug("Re-fetched intent state")
+
+			if freshIntent.Deposited {
+				log.WithFields(log.Fields{
+					"intentID": intentID,
+					"attempt":  i + 1,
+				}).Info("Deposit became visible after retry")
+				intent = freshIntent
+				break
+			}
+		}
+
+		// Final check after retries
+		if !intent.Deposited {
+			log.WithFields(log.Fields{
+				"intentID":   intentID,
+				"network":    sourceNetworkKey,
+				"maxRetries": maxRetries,
+			}).Error("Intent not deposited after all retries")
+			return nil, fmt.Errorf("intent not deposited yet - solver must deposit first")
+		}
 	}
 
-	requesterAddress := common.HexToAddress(requesterAddr)
+	// Final verification that requester is the winning solver
 	winningAddress := common.HexToAddress(intent.WinningSolver)
-
 	if requesterAddress != winningAddress {
 		log.WithFields(log.Fields{
 			"intentID":        intentID,

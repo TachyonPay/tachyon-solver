@@ -21,6 +21,7 @@ func NewRelayerAPI(r *relayer.Relayer) *RelayerAPI {
 
 func (api *RelayerAPI) RegisterRoutes(r *gin.Engine) {
 	r.GET("/health", api.HealthCheck)
+	r.GET("/ecies-pubkey", api.GetECIESPublicKey)
 	r.POST("/store-recipients", api.StoreRecipients)
 	r.GET("/get-recipients/:intentId", api.GetRecipients)
 	r.GET("/list-stored-intents", api.ListStoredIntents)
@@ -42,6 +43,16 @@ func (api *RelayerAPI) HealthCheck(c *gin.Context) {
 		Timestamp: time.Now().Format(time.RFC3339),
 		Networks:  networks,
 		ChainInfo: chainInfo,
+	})
+}
+
+func (api *RelayerAPI) GetECIESPublicKey(c *gin.Context) {
+	publicKey := api.relayer.GetECIESPublicKey()
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":   true,
+		"publicKey": publicKey,
+		"message":   "Use this public key to encrypt recipient information",
 	})
 }
 

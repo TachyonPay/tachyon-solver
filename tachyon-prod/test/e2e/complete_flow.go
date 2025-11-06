@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	ecies "github.com/ecies/go/v2"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -458,12 +460,93 @@ func mustGetBlockNumber(ctx context.Context, client *ethclient.Client) uint64 {
 	return block
 }
 
-func storeRecipients(relayerURL, intentID string, recipients, amounts []string, chainID int64) error {
+// fetchECIESPublicKey retrieves the ECIES public key from the relayer
+func fetchECIESPublicKey(relayerURL string) (*ecies.PublicKey, error) {
+	resp, err := http.Get(fmt.Sprintf("%s/ecies-pubkey", relayerURL))
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch public key: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to fetch public key: %s", string(body))
+	}
+
+	var result struct {
+		Success   bool   `json:"success"`
+		PublicKey string `json:"publicKey"`
+		Message   string `json:"message"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode public key response: %w", err)
+	}
+
+	if !result.Success {
+		return nil, fmt.Errorf("failed to get public key: %s", result.Message)
+	}
+
+	// Parse the hex-encoded public key
+	pubKeyBytes, err := hex.DecodeString(result.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("invalid public key hex: %w", err)
+	}
+
+	publicKey, err := ecies.NewPublicKeyFromBytes(pubKeyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse public key: %w", err)
+	}
+
+	return publicKey, nil
+}
+
+// encryptRecipientData encrypts recipient information using ECIES
+func encryptRecipientData(publicKey *ecies.PublicKey, recipients, amounts []string) (string, error) {
+	// Prepare the data to encrypt
 	data := map[string]interface{}{
-		"intentId":   intentID,
 		"recipients": recipients,
 		"amounts":    amounts,
-		"chainId":    chainID,
+	}
+
+	// Convert to JSON
+	plaintext, err := json.Marshal(data)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal recipient data: %w", err)
+	}
+
+	// Encrypt using ECIES
+	encrypted, err := ecies.Encrypt(publicKey, plaintext)
+	if err != nil {
+		return "", fmt.Errorf("failed to encrypt data: %w", err)
+	}
+
+	// Return hex-encoded encrypted data
+	return hex.EncodeToString(encrypted), nil
+}
+
+func storeRecipients(relayerURL, intentID string, recipients, amounts []string, chainID int64) error {
+	// Fetch the ECIES public key from relayer
+	fmt.Println("🔐 Fetching ECIES public key from relayer...")
+	publicKey, err := fetchECIESPublicKey(relayerURL)
+	if err != nil {
+		return fmt.Errorf("failed to fetch ECIES public key: %w", err)
+	}
+	fmt.Println("✅ Public key fetched")
+
+	// Encrypt the recipient data
+	fmt.Println("🔒 Encrypting recipient data...")
+	encryptedData, err := encryptRecipientData(publicKey, recipients, amounts)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt recipient data: %w", err)
+	}
+	fmt.Println("✅ Data encrypted")
+
+	// Send encrypted data to relayer
+	data := map[string]interface{}{
+		"intentId":      intentID,
+		"chainId":       chainID,
+		"encryptedData": encryptedData,
 	}
 
 	jsonData, err := json.Marshal(data)

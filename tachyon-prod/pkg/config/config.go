@@ -1,11 +1,13 @@
 package config
 
 import (
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"os"
 	"strconv"
 
+	ecies "github.com/ecies/go/v2"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/joho/godotenv"
 	"github.com/zk-tachyon/tachyon-prod/pkg/types"
@@ -22,6 +24,10 @@ type Config struct {
 
 	// Wallet configuration
 	PrivateKey string
+
+	// ECIES keypair for encrypting recipient information
+	ECIESPrivateKey *ecies.PrivateKey
+	ECIESPublicKey  *ecies.PublicKey
 
 	// Service ports
 	SolverPort  string
@@ -113,6 +119,33 @@ func LoadConfig() (*Config, error) {
 	cfg.RelayerURL = getEnv("RELAYER_URL", "http://localhost:3000")
 	cfg.SolverPort = getEnv("SOLVER_PORT", "3001")
 	cfg.RelayerPort = getEnv("RELAYER_PORT", "3000")
+
+	// Load or generate ECIES keypair for recipient encryption
+	eciesPrivKeyHex := os.Getenv("ECIES_PRIVATE_KEY")
+	if eciesPrivKeyHex == "" {
+		// Generate a new ECIES keypair
+		privKey, err := ecies.GenerateKey()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate ECIES keypair: %w", err)
+		}
+		cfg.ECIESPrivateKey = privKey
+		cfg.ECIESPublicKey = privKey.PublicKey
+
+		// Print the generated private key so it can be added to .env
+		fmt.Printf("\nWARNING: No ECIES_PRIVATE_KEY found in environment. Generated new keypair.\n")
+		fmt.Printf("Add this to your .env file:\n")
+		fmt.Printf("ECIES_PRIVATE_KEY=%s\n\n", hex.EncodeToString(privKey.Bytes()))
+	} else {
+		// Load existing private key from environment
+		privKeyBytes, err := hex.DecodeString(eciesPrivKeyHex)
+		if err != nil {
+			return nil, fmt.Errorf("invalid ECIES_PRIVATE_KEY hex: %w", err)
+		}
+
+		privKey := ecies.NewPrivateKeyFromBytes(privKeyBytes)
+		cfg.ECIESPrivateKey = privKey
+		cfg.ECIESPublicKey = privKey.PublicKey
+	}
 
 	return cfg, nil
 }

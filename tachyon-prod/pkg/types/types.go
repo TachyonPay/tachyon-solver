@@ -77,11 +77,16 @@ type RelayerResponse struct {
 }
 
 // StoreRecipientsRequest is the request body for storing recipients
+// Supports both encrypted and unencrypted formats for backward compatibility
 type StoreRecipientsRequest struct {
 	IntentID   string   `json:"intentId" binding:"required"`
-	Recipients []string `json:"recipients" binding:"required"`
-	Amounts    []string `json:"amounts" binding:"required"`
+	Recipients []string `json:"recipients,omitempty"` // Deprecated: use EncryptedData instead
+	Amounts    []string `json:"amounts,omitempty"`    // Deprecated: use EncryptedData instead
 	ChainID    int64    `json:"chainId" binding:"required"`
+
+	// New encrypted format - hex-encoded ECIES encrypted data
+	// The plaintext should be JSON: {"recipients": [...], "amounts": [...]}
+	EncryptedData string `json:"encryptedData,omitempty"`
 }
 
 // SettleRequest is the request body for settling an intent
