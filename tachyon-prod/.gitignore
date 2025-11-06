@@ -14,10 +14,7 @@ bin/
 # Go workspace file
 go.work
 
-# Environment files
-.env
-.env.local
-.env.*.local
+
 
 # IDE files
 .vscode/

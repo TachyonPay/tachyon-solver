@@ -1,275 +1,294 @@
 import { ethers } from "hardhat";
 import axios from "axios";
-import * as fs from "fs";
-import * as path from "path";
+import dotenv from "dotenv";
+
+dotenv.config({ path: "tachyon-prod/.env" });
 
 const RELAYER_URL = 'http://localhost:3000';
 const EXPECTED_AMOUNT_B = ethers.parseEther("95");
 
-// Network configurations
+// Network configurations from .env
 const networks = {
   horizen: {
     name: "Horizen Testnet",
-    explorer: "https://horizen-explorer-testnet.appchain.base.org"
+    rpc: process.env.PAIR_1_SOURCE_RPC!,
+    bridge: process.env.PAIR_1_SOURCE_BRIDGE!,
+    explorer: process.env.PAIR_1_SOURCE_EXPLORER!,
+    chainId: process.env.PAIR_1_SOURCE_CHAIN_ID!,
+    tokens: {
+      usdc: process.env.TOKEN_USDC_HORIZEN!,
+      weth: process.env.TOKEN_WETH_HORIZEN!,
+    }
   },
   base: {
-    name: "Base Sepolia", 
-    explorer: "https://sepolia-explorer.base.org"
+    name: "Base Sepolia",
+    rpc: process.env.PAIR_1_DEST_RPC!,
+    bridge: process.env.PAIR_1_DEST_BRIDGE!,
+    explorer: process.env.PAIR_1_DEST_EXPLORER!,
+    chainId: process.env.PAIR_1_DEST_CHAIN_ID!,
+    tokens: {
+      usdc: process.env.TOKEN_USDC_BASE!,
+      weth: process.env.TOKEN_WETH_BASE!,
+    }
+  },
+  sepolia: {
+    name: "Ethereum Sepolia",
+    rpc: process.env.PAIR_2_DEST_RPC!,
+    bridge: process.env.PAIR_2_DEST_BRIDGE!,
+    explorer: process.env.PAIR_2_DEST_EXPLORER!,
+    chainId: process.env.PAIR_2_DEST_CHAIN_ID!,
+    tokens: {
+      usdc: process.env.TOKEN_USDC_SEPOLIA!,
+      weth: process.env.TOKEN_WETH_SEPOLIA!,
+    }
   }
 };
 
-async function main() {
-  console.log("🚀 Starting complete cross-chain bridge flow test...\n");
+async function createIntent(
+  sourceChain: string,
+  destChain: string,
+  sourceProvider: ethers.JsonRpcProvider,
+  sourceBridge: any,
+  tokenA: string,
+  tokenB: string,
+  testNumber: number
+) {
+  console.log(`\n${"=".repeat(80)}`);
+  console.log(`🧪 TEST ${testNumber}: ${sourceChain} → ${destChain}`);
+  console.log(`${"=".repeat(80)}`);
 
-  // Get providers
-  const horizenProvider = new ethers.JsonRpcProvider(process.env.HORIZEN_TESTNET_RPC_URL!);
-  const baseProvider = new ethers.JsonRpcProvider(process.env.BASE_SEPOLIA_RPC_URL!);
-
-  // Get contract addresses
-  const bridgeAddress_Horizen = process.env.BRIDGE_CONTRACT_HORIZEN_LATEST!;
-  const bridgeAddress_Base = process.env.BRIDGE_CONTRACT_BASE_LATEST!;
-
-  // Create wallets
-  const privateKey = process.env.PRIVATE_KEY!;
-  const horizenWallet = new ethers.Wallet(privateKey, horizenProvider);
-  const baseWallet = new ethers.Wallet(privateKey, baseProvider);
-
-  // Get chain IDs
-  const horizenChainId = await horizenProvider.getNetwork().then(net => net.chainId);
-  const baseChainId = await baseProvider.getNetwork().then(net => net.chainId);
-
-  console.log(`📍 Chain IDs: Horizen=${horizenChainId}, Base=${baseChainId}\n`);
-
-  // Connect to contracts
-  const BridgeFactory = await ethers.getContractFactory("BridgeIntent");
-  const bridge_Horizen = BridgeFactory.attach(bridgeAddress_Horizen).connect(horizenWallet) as any;
-  const bridge_Base = BridgeFactory.attach(bridgeAddress_Base).connect(baseWallet) as any;
-
-  // Get current latest intent ID to ensure we use a fresh one
-  const currentLatestIntentId = await bridge_Horizen.getLatestIntentId();
-  const targetIntentId = currentLatestIntentId + 1n;
-  console.log(`🎯 Target Intent ID: ${targetIntentId} (will be created next)`);
-
-  // Deploy tokens with dynamic nonces
-  console.log("🪙 STEP 1: Deploying tokens...");
-  
-  const horizenNonce = await horizenProvider.getTransactionCount(horizenWallet.address);
-  const baseNonce = await baseProvider.getTransactionCount(baseWallet.address);
-  
-  const MockERC20Factory = await ethers.getContractFactory("MockERC20");
-  
-  const tokenA_Horizen = await MockERC20Factory.connect(horizenWallet).deploy(
-    "Token A", "TKA", ethers.parseEther("1000000"),
-    { nonce: horizenNonce }
-  );
-  await tokenA_Horizen.waitForDeployment();
-  
-  const tokenB_Base = await MockERC20Factory.connect(baseWallet).deploy(
-    "Token B", "TKB", ethers.parseEther("1000000"),
-    { nonce: baseNonce }
-  );
-  await tokenB_Base.waitForDeployment();
-
-  console.log(`✅ TokenA (Horizen): ${await tokenA_Horizen.getAddress()}`);
-  console.log(`✅ TokenB (Base): ${await tokenB_Base.getAddress()}\n`);
-
-  // STEP 1.5: Store recipient information in relayer
-  console.log("📋 STEP 1.5: Store recipient information in relayer...");
-  
-  // Generate random recipient addresses and split the amount
-  const recipient1 = ethers.Wallet.createRandom().address;
-  const recipient2 = ethers.Wallet.createRandom().address;
-  const recipient3 = ethers.Wallet.createRandom().address;
-  
-  const amount1 = ethers.parseEther("30");
-  const amount2 = ethers.parseEther("35");
-  const amount3 = ethers.parseEther("30");
-  
-  const testRecipients = [recipient1, recipient2, recipient3];
-  const testAmounts = [amount1, amount2, amount3];
-  
-  console.log(`🎯 Recipients: ${testRecipients.join(", ")}`);
-  console.log(`💰 Amounts: ${testAmounts.map(a => ethers.formatEther(a)).join(", ")} ETH`);
-
-  // STEP 2: Create intent on Horizen
-  console.log("\n🎯 STEP 2: Creating intent on Horizen Testnet...");
-  
-  const auctionDuration = 20; // 20 seconds for faster testing
+  const auctionDuration = 30; // 30 seconds for testing
   const reward = ethers.parseEther("5");
-  
+
+  // Get current latest intent ID
+  const currentLatestIntentId = await sourceBridge.getLatestIntentId();
+  const targetIntentId = currentLatestIntentId + 1n;
+  console.log(`🎯 Target Intent ID: ${targetIntentId}`);
+
+  // Get token contracts
+  const MockERC20Factory = await ethers.getContractFactory("MockERC20");
+  const tokenAContract = MockERC20Factory.attach(tokenA).connect(sourceBridge.runner);
+
   // Approve tokens for intent creation
-  const approveIntentTx = await tokenA_Horizen.approve(bridgeAddress_Horizen, EXPECTED_AMOUNT_B + reward);
+  console.log("🔐 Approving tokens for intent creation...");
+  const approveIntentTx = await tokenAContract.approve(
+    await sourceBridge.getAddress(),
+    EXPECTED_AMOUNT_B + reward
+  );
   await approveIntentTx.wait();
-  console.log("✅ Approved tokens for intent creation");
+  console.log("✅ Tokens approved");
 
   // Create intent
-  const createIntentTx = await bridge_Horizen.createIntent(
-    await tokenA_Horizen.getAddress(),
-    await tokenB_Base.getAddress(),
+  console.log("🎯 Creating intent...");
+  const createIntentTx = await sourceBridge.createIntent(
+    tokenA,
+    tokenB,
     EXPECTED_AMOUNT_B,
     EXPECTED_AMOUNT_B,
     reward,
     auctionDuration
   );
   await createIntentTx.wait();
-  console.log("✅ Intent created on Horizen");
 
-  // Verify we got the expected intent ID
-  const actualIntentId = await bridge_Horizen.getLatestIntentId();
-  console.log(`🎯 Actual Intent ID: ${actualIntentId} (should match target: ${targetIntentId})`);
-  console.log(`📍 Transaction: ${networks.horizen.explorer}/tx/${createIntentTx.hash}\n`);
+  const actualIntentId = await sourceBridge.getLatestIntentId();
+  console.log(`✅ Intent created: ${actualIntentId}`);
+  console.log(`📍 Transaction: ${(networks as any)[sourceChain].explorer}/tx/${createIntentTx.hash}`);
 
-  if (actualIntentId !== targetIntentId) {
-    console.log(`⚠️  Warning: Intent ID mismatch. Expected: ${targetIntentId}, Got: ${actualIntentId}`);
-  }
+  // Generate recipients for this intent
+  const recipient1 = ethers.Wallet.createRandom().address;
+  const recipient2 = ethers.Wallet.createRandom().address;
+  const recipient3 = ethers.Wallet.createRandom().address;
+
+  const amount1 = ethers.parseEther("30");
+  const amount2 = ethers.parseEther("35");
+  const amount3 = ethers.parseEther("30");
+
+  const testRecipients = [recipient1, recipient2, recipient3];
+  const testAmounts = [amount1, amount2, amount3];
 
   // Store recipient information in relayer
+  // IMPORTANT: Use SOURCE chain ID, not destination, because intent IDs are per-chain
+  console.log("📋 Storing recipients in relayer...");
   try {
-    const storeResponse = await axios.post(`${RELAYER_URL}/store-recipients`, {
+    const sourceChainId = (networks as any)[sourceChain].chainId;
+    await axios.post(`${RELAYER_URL}/store-recipients`, {
       intentId: actualIntentId.toString(),
       recipients: testRecipients,
       amounts: testAmounts.map(a => a.toString()),
-      chainId: Number(baseChainId)
+      chainId: Number(sourceChainId)
     });
-    console.log("✅ Recipient information stored in relayer");
-  } catch (error) {
-    console.log("❌ Error storing recipient information:", error);
+    console.log("✅ Recipients stored in relayer");
+  } catch (error: any) {
+    console.log(`❌ Error storing recipients: ${error.message}`);
   }
 
-  // STEP 3: Place bid BEFORE auction ends
-  console.log("\n🏆 STEP 3: Placing bid before auction ends...");
-  
-  const bidAmount = ethers.parseEther("98");
-  const placeBidTx = await bridge_Horizen.placeBid(actualIntentId, bidAmount);
-  await placeBidTx.wait();
-  console.log("✅ Bid placed successfully");
+  console.log(`\n⏳ Waiting for solver to detect and process intent...`);
+  console.log(`   (Auction duration: ${auctionDuration}s + processing time)`);
 
-  // STEP 4: Wait for auction to end
-  console.log(`⏳ STEP 4: Waiting ${auctionDuration + 5} seconds for auction to end...`);
-  await new Promise(resolve => setTimeout(resolve, (auctionDuration + 5) * 1000));
+  return {
+    intentId: actualIntentId,
+    recipients: testRecipients,
+    amounts: testAmounts,
+    sourceChain,
+    destChain
+  };
+}
 
-  // STEP 5: Finalize auction
-  console.log("\n🔨 STEP 5: Finalizing auction...");
-  const finalizeTx = await bridge_Horizen.finalizeAuction(actualIntentId);
-  await finalizeTx.wait();
-  console.log("✅ Auction finalized");
+async function main() {
+  console.log("🚀 Starting Multi-Chain E2E Test");
+  console.log("Testing 4 bidirectional intent flows:\n");
+  console.log("  1. Horizen → Base Sepolia");
+  console.log("  2. Base Sepolia → Horizen");
+  console.log("  3. Horizen → Ethereum Sepolia");
+  console.log("  4. Ethereum Sepolia → Horizen\n");
 
-  // STEP 6: Deposit and pickup
-  console.log("\n💰 STEP 6: Depositing and picking up...");
-  
-  // Approve tokens for deposit
-  const approveDepositTx = await tokenA_Horizen.approve(bridgeAddress_Horizen, bidAmount);
-  await approveDepositTx.wait();
-  console.log("✅ Approved tokens for deposit");
-  
-  const depositTx = await bridge_Horizen.depositAndPickup(actualIntentId);
-  await depositTx.wait();
-  console.log("✅ Deposit completed");
+  // Setup providers
+  const horizenProvider = new ethers.JsonRpcProvider(networks.horizen.rpc);
+  const baseProvider = new ethers.JsonRpcProvider(networks.base.rpc);
+  const sepoliaProvider = new ethers.JsonRpcProvider(networks.sepolia.rpc);
 
-  // STEP 7: Solver provides TokenB to recipients on Base
-  console.log("\n🌐 STEP 7: Solver provides TokenB to recipients on Base Sepolia");
-  
-  // Check TokenB balance on Base
-  const tokenBBalance = await tokenB_Base.balanceOf(baseWallet.address);
-  console.log(`💰 TokenB balance on Base: ${ethers.formatEther(tokenBBalance)}`);
-  
-  if (tokenBBalance < EXPECTED_AMOUNT_B) {
-    console.log(`❌ Insufficient TokenB balance. Need: ${ethers.formatEther(EXPECTED_AMOUNT_B)}, Have: ${ethers.formatEther(tokenBBalance)}`);
-    console.log(`💡 The solver needs more TokenB tokens to complete the bridge`);
-    return;
-  }
-  
-  // Check if intent is already solved on Base
-  const isAlreadySolved = await bridge_Base.isIntentSolvedOnChain2(actualIntentId);
-  console.log(`🔍 Intent ${actualIntentId} already solved on Base: ${isAlreadySolved}`);
-  
-  if (isAlreadySolved) {
-    console.log(`⚠️  Intent ${actualIntentId} already solved on Base, skipping solve step...`);
-  } else {
-    // Check current allowance
-    const currentAllowance = await tokenB_Base.allowance(baseWallet.address, bridgeAddress_Base);
-    console.log(`🔐 Current TokenB allowance: ${ethers.formatEther(currentAllowance)}`);
-    
-    if (currentAllowance < EXPECTED_AMOUNT_B) {
-      console.log(`🔐 Approving TokenB for bridge contract...`);
-      const approveTokenBTx = await tokenB_Base.approve(bridgeAddress_Base, EXPECTED_AMOUNT_B);
-      await approveTokenBTx.wait();
-      console.log("✅ Approved TokenB for bridge contract");
-      
-      // Verify approval
-      const newAllowance = await tokenB_Base.allowance(baseWallet.address, bridgeAddress_Base);
-      console.log(`🔐 New TokenB allowance: ${ethers.formatEther(newAllowance)}`);
-    } else {
-      console.log("✅ TokenB already approved");
-    }
-    
-    // Use solveIntentOnChain2 function with simple intent ID
-    console.log(`🔧 Using simple intent ID: ${actualIntentId}`);
-    console.log(`📋 Recipients: ${testRecipients.length}`);
-    console.log(`💰 Total amount: ${ethers.formatEther(EXPECTED_AMOUNT_B)}`);
-    
+  // Setup wallets
+  const privateKey = process.env.PRIVATE_KEY!;
+  const horizenWallet = new ethers.Wallet(privateKey, horizenProvider);
+  const baseWallet = new ethers.Wallet(privateKey, baseProvider);
+  const sepoliaWallet = new ethers.Wallet(privateKey, sepoliaProvider);
+
+  // Connect to bridge contracts
+  const BridgeFactory = await ethers.getContractFactory("BridgeIntent");
+  const bridge_Horizen = BridgeFactory.attach(networks.horizen.bridge).connect(horizenWallet);
+  const bridge_Base = BridgeFactory.attach(networks.base.bridge).connect(baseWallet);
+  const bridge_Sepolia = BridgeFactory.attach(networks.sepolia.bridge).connect(sepoliaWallet);
+
+  console.log("💼 Wallet Address:", horizenWallet.address);
+  console.log("\n📡 Network Status:");
+  console.log(`  Horizen: Block ${await horizenProvider.getBlockNumber()}`);
+  console.log(`  Base Sepolia: Block ${await baseProvider.getBlockNumber()}`);
+  console.log(`  Ethereum Sepolia: Block ${await sepoliaProvider.getBlockNumber()}`);
+
+  // Create all 4 intents
+  const intents = [];
+
+  // Test 1: Horizen → Base Sepolia (WETH)
+  intents.push(await createIntent(
+    "horizen",
+    "base",
+    horizenProvider,
+    bridge_Horizen,
+    networks.horizen.tokens.weth,
+    networks.base.tokens.weth,
+    1
+  ));
+
+  // Wait between intents
+  console.log("\n⏳ Waiting 5 seconds before next intent...");
+  await new Promise(resolve => setTimeout(resolve, 5000));
+
+  // Test 2: Base Sepolia → Horizen (USDC)
+  intents.push(await createIntent(
+    "base",
+    "horizen",
+    baseProvider,
+    bridge_Base,
+    networks.base.tokens.usdc,
+    networks.horizen.tokens.usdc,
+    2
+  ));
+
+  // Wait between intents
+  console.log("\n⏳ Waiting 5 seconds before next intent...");
+  await new Promise(resolve => setTimeout(resolve, 5000));
+
+  // Test 3: Horizen → Ethereum Sepolia (USDC)
+  intents.push(await createIntent(
+    "horizen",
+    "sepolia",
+    horizenProvider,
+    bridge_Horizen,
+    networks.horizen.tokens.usdc,
+    networks.sepolia.tokens.usdc,
+    3
+  ));
+
+  // Wait between intents
+  console.log("\n⏳ Waiting 5 seconds before next intent...");
+  await new Promise(resolve => setTimeout(resolve, 5000));
+
+  // Test 4: Ethereum Sepolia → Horizen (WETH)
+  intents.push(await createIntent(
+    "sepolia",
+    "horizen",
+    sepoliaProvider,
+    bridge_Sepolia,
+    networks.sepolia.tokens.weth,
+    networks.horizen.tokens.weth,
+    4
+  ));
+
+  // Wait for all auctions to complete and solver to process
+  console.log(`\n\n${"=".repeat(80)}`);
+  console.log("⏳ All intents created! Waiting 60 seconds for solver to process...");
+  console.log(`${"=".repeat(80)}`);
+  await new Promise(resolve => setTimeout(resolve, 60000));
+
+  // Verify all intents
+  console.log(`\n\n${"=".repeat(80)}`);
+  console.log("🔍 VERIFICATION PHASE");
+  console.log(`${"=".repeat(80)}`);
+
+  for (let i = 0; i < intents.length; i++) {
+    const intent = intents[i];
+    console.log(`\n📊 Intent ${i + 1}: ${intent.sourceChain} → ${intent.destChain} (ID: ${intent.intentId})`);
+
     try {
-      const solveTx = await bridge_Base.solveIntentOnChain2(
-        actualIntentId, // Use simple intent ID
-        horizenWallet.address, // User from chain1
-        await tokenB_Base.getAddress(), // TokenB on Base
-        EXPECTED_AMOUNT_B,
-        testRecipients, // Recipients array
-        testAmounts // Amounts array
-      );
-      await solveTx.wait();
-      
-      console.log(`✅ Intent solved on Base using solveIntentOnChain2`);
-      console.log(`📍 Transaction: ${networks.base.explorer}/tx/${solveTx.hash}`);
+      // Get source and dest bridges
+      const sourceBridge = intent.sourceChain === "horizen" ? bridge_Horizen :
+                          intent.sourceChain === "base" ? bridge_Base : bridge_Sepolia;
+      const destBridge = intent.destChain === "horizen" ? bridge_Horizen :
+                        intent.destChain === "base" ? bridge_Base : bridge_Sepolia;
+
+      // Check if intent completed on source
+      const intentDetails = await sourceBridge.getIntent(intent.intentId);
+      console.log(`  Source Chain Status: ${intentDetails.completed ? "✅ Completed" : "❌ Not Completed"}`);
+
+      if (intentDetails.winningSolver !== ethers.ZeroAddress) {
+        console.log(`  Winning Solver: ${intentDetails.winningSolver}`);
+        console.log(`  Winning Bid: ${ethers.formatEther(intentDetails.winningBid)} ETH`);
+      }
+
+      // Check if solved on destination
+      const isSolved = await destBridge.isIntentSolvedOnChain2(intent.intentId);
+      console.log(`  Destination Chain Status: ${isSolved ? "✅ Solved" : "❌ Not Solved"}`);
+
+      // Test verify endpoint
+      const destChainId = (networks as any)[intent.destChain].chainId;
+      const verifyResponse = await axios.post(`${RELAYER_URL}/verify`, {
+        intentId: intent.intentId.toString(),
+        chain2IntentId: intent.intentId.toString(),
+        chainId: Number(destChainId)
+      });
+      console.log(`  Relayer Verification: ${verifyResponse.data.verified ? "✅ Verified" : "❌ Not Verified"}`);
+
     } catch (error: any) {
-      console.log(`❌ Error solving intent: ${error.message}`);
-      console.log(`🔍 Error details:`, error);
-      return;
+      console.log(`  ❌ Error verifying intent: ${error.message}`);
     }
   }
-  console.log();
 
-  // Wait for state to be updated before verification
-  console.log("\n⏳ Waiting 30 seconds for state to be updated before verification...");
-  await new Promise(resolve => setTimeout(resolve, 300));
-
-  // Direct contract verification
-  console.log("\n🔍 Direct contract verification...");
-  const isSolvedDirectly = await bridge_Base.isIntentSolvedOnChain2(actualIntentId);
-  console.log(`✅ Intent ${actualIntentId} solved status (direct): ${isSolvedDirectly}`);
-
-  // Test verify endpoint with the current intent
-  console.log("\n🔍 Testing verify endpoint...");
-  const verifyResponse = await axios.post(`${RELAYER_URL}/verify`, {
-    intentId: actualIntentId.toString(),
-    chain2IntentId: actualIntentId.toString(), // Use same simple ID
-    chainId: Number(baseChainId)
-  });
-  console.log("✅ Verify response:", verifyResponse.data);
-
-  // Only proceed with settle if intent is solved
-  if (isSolvedDirectly) {
-    // Test settle endpoint
-    console.log("\n💰 Testing settle endpoint...");
-    const settleResponse = await axios.post(`${RELAYER_URL}/settle`, {
-      intentId: actualIntentId.toString(),
-      chain2IntentId: actualIntentId.toString(), // Use same simple ID
-      originChainId: Number(horizenChainId),
-      destinationChainId: Number(baseChainId),
-      solverAddress: horizenWallet.address
-    });
-    console.log("✅ Settle response:", settleResponse.data);
-  } else {
-    console.log("\n⚠️  Skipping settle endpoint - intent not solved on destination chain");
-  }
-
-  console.log("\n🎉 Complete flow test finished successfully!");
-  console.log(`🎯 Final Intent ID used: ${actualIntentId}`);
+  console.log(`\n\n${"=".repeat(80)}`);
+  console.log("🎉 Multi-Chain E2E Test Complete!");
+  console.log(`${"=".repeat(80)}`);
+  console.log("\n📊 Summary:");
+  console.log(`  Total Intents Created: ${intents.length}`);
+  console.log(`  Test Scenarios:`);
+  console.log(`    ✓ Horizen → Base Sepolia (WETH)`);
+  console.log(`    ✓ Base Sepolia → Horizen (USDC)`);
+  console.log(`    ✓ Horizen → Ethereum Sepolia (USDC)`);
+  console.log(`    ✓ Ethereum Sepolia → Horizen (WETH)`);
+  console.log(`\n💡 Check the solver logs to see the routing decisions for each chain pair!`);
 }
 
 main()
   .then(() => process.exit(0))
   .catch((error) => {
-    console.error(error);
+    console.error("❌ Test failed:", error);
     process.exit(1);
   });

@@ -29,6 +29,7 @@ type Intent struct {
 	AmountA         *big.Int
 	ExpectedAmountB *big.Int
 	Reward          *big.Int
+	DestChainId     *big.Int // Destination chain where tokens should be delivered
 	EndTime         *big.Int
 	Completed       bool
 	WinningSolver   string

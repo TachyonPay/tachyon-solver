@@ -50,28 +50,29 @@ func NewSolver(cfg *config.Config) (*Solver, error) {
 	txMutexes := make(map[string]*sync.Mutex)
 	bidWorkerPools := make(map[string]chan bidJob)
 
-	for networkKey, networkCfg := range cfg.Networks {
+	// Initialize clients for each configured chain
+	for chainID, chainCfg := range cfg.Chains {
 		client, err := blockchain.NewClient(
-			networkCfg.RpcURL,
-			networkCfg.BridgeAddress,
+			chainCfg.RpcURL,
+			chainCfg.BridgeAddress,
 			cfg.PrivateKey,
-			networkCfg.ChainID,
-			networkCfg.Name,
+			chainCfg.ChainID,
+			chainCfg.Name,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create client for %s: %w", networkKey, err)
+			return nil, fmt.Errorf("failed to create client for chain %s (%s): %w", chainCfg.Name, chainID, err)
 		}
-		clients[networkKey] = client
-		txMutexes[networkKey] = &sync.Mutex{}
-		bidWorkerPools[networkKey] = make(chan bidJob, 50)
-		log.WithField("network", networkKey).Info("Blockchain client initialized")
+		clients[chainID] = client
+		txMutexes[chainID] = &sync.Mutex{}
+		bidWorkerPools[chainID] = make(chan bidJob, 50)
+		log.WithFields(log.Fields{
+			"chain":   chainCfg.Name,
+			"chainID": chainID,
+		}).Info("Blockchain client initialized")
 	}
 
+	// No need for pair map - we use destChainId from intents dynamically
 	chainPairMap := make(map[string]string)
-	for _, pair := range cfg.ChainPairs {
-		chainPairMap[pair.SourceChain.Name] = pair.DestChain.Name
-		chainPairMap[pair.DestChain.Name] = pair.SourceChain.Name
-	}
 
 	solver := &Solver{
 		cfg:                cfg,
@@ -91,9 +92,9 @@ func NewSolver(cfg *config.Config) (*Solver, error) {
 	}
 
 	log.WithFields(log.Fields{
-		"pairCount": len(cfg.ChainPairs),
-		"networks":  len(clients),
-	}).Info("Solver initialized with chain pairs")
+		"chainCount": len(cfg.Chains),
+		"clients":    len(clients),
+	}).Info("Solver initialized with chain-based configuration")
 
 	return solver, nil
 }
@@ -115,7 +116,7 @@ func (s *Solver) Start() error {
 		log.WithError(err).Warn("Failed to register with relayer, will continue without registration")
 	}
 
-	for networkKey := range s.cfg.Networks {
+	for networkKey := range s.cfg.Chains {
 		go s.pollEvents(networkKey)
 	}
 
@@ -130,15 +131,28 @@ func (s *Solver) RegisterWithRelayer() error {
 		break
 	}
 
+	// Generate all possible routes (every chain can be source or destination)
 	routes := []types.Route{}
-	for _, pair := range s.cfg.ChainPairs {
-		route := types.Route{
-			SourceChain: pair.SourceChain.Name,
-			DestChain:   pair.DestChain.Name,
-			TokenA:      "",
-			TokenB:      "",
+	chainIDs := make([]string, 0, len(s.cfg.Chains))
+	for chainID := range s.cfg.Chains {
+		chainIDs = append(chainIDs, chainID)
+	}
+
+	// Create bidirectional routes between all chain pairs
+	for i, sourceChainID := range chainIDs {
+		sourceCfg := s.cfg.Chains[sourceChainID]
+		for j, destChainID := range chainIDs {
+			if i != j { // Don't create route to same chain
+				destCfg := s.cfg.Chains[destChainID]
+				route := types.Route{
+					SourceChain: sourceCfg.Name,
+					DestChain:   destCfg.Name,
+					TokenA:      "", // Support all tokens
+					TokenB:      "",
+				}
+				routes = append(routes, route)
+			}
 		}
-		routes = append(routes, route)
 	}
 
 	req := types.RegisterSolverRequest{
@@ -317,13 +331,14 @@ func (s *Solver) pollEvents(networkKey string) {
 		return
 	}
 
+	// Start from current block (no lookback)
 	s.mu.Lock()
 	s.lastProcessedBlock[networkKey] = new(big.Int).Set(currentBlock)
 	s.mu.Unlock()
 
 	log.WithFields(log.Fields{
-		"network":     networkKey,
-		"startBlock": currentBlock,
+		"network":      networkKey,
+		"currentBlock": currentBlock,
 	}).Info("Starting event polling")
 
 	for {
@@ -468,19 +483,30 @@ func (s *Solver) calculateProfitableBid(ctx context.Context, networkKey string, 
 
 	targetBidFloat := new(big.Float).Sub(minBidFloat, marginAmount)
 
-	twoTokens := new(big.Float).SetInt(new(big.Int).Mul(big.NewInt(2), big.NewInt(1e18)))
-	targetBidFloat = new(big.Float).Sub(targetBidFloat, twoTokens)
+	// Get token decimals to calculate appropriate gas buffer
+	client := s.clients[networkKey]
+	tokenAAddr := common.HexToAddress(intent.TokenA)
+	decimals, err := client.GetTokenDecimals(ctx, tokenAAddr)
+	if err != nil {
+		log.WithError(err).Warn("Failed to get token decimals, defaulting to 18")
+		decimals = 18
+	}
+
+	// Subtract a small gas buffer (e.g., 2 tokens) based on actual token decimals
+	gasBuffer := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
+	gasBuffer = new(big.Int).Mul(gasBuffer, big.NewInt(2)) // 2 tokens
+	gasBufferFloat := new(big.Float).SetInt(gasBuffer)
+	targetBidFloat = new(big.Float).Sub(targetBidFloat, gasBufferFloat)
 
 	targetBid, _ := targetBidFloat.Int(nil)
 
 	log.WithFields(log.Fields{
 		"minBid":       minBid.String(),
 		"profitMargin": s.cfg.SolverConfig.MinProfitMargin,
+		"decimals":     decimals,
+		"gasBuffer":    gasBuffer.String(),
 		"targetBid":    targetBid.String(),
 	}).Debug("Calculated bid amount")
-
-	client := s.clients[networkKey]
-	tokenAAddr := common.HexToAddress(intent.TokenA)
 	balance, err := client.GetBalance(ctx, tokenAAddr)
 	if err != nil {
 		log.WithError(err).Error("Failed to get TokenA balance")
@@ -567,11 +593,38 @@ func (s *Solver) startBiddingLoop(ctx context.Context, networkKey string, intent
 						}
 					}
 
+					// Wait for blockchain state to propagate, then re-fetch intent
+					time.Sleep(3 * time.Second)
 					intent, err = client.GetIntent(ctx, intentID)
 					if err != nil {
 						log.WithError(err).Warn("Failed to get intent after finalization, will retry")
 						time.Sleep(2 * time.Second)
 						continue
+					}
+				}
+
+				// If winner is still zero after trying to finalize, wait and retry a few times
+				// This handles the case where another party is finalizing the auction
+				if intent.WinningSolver == (common.Address{}.Hex()) {
+					maxRetries := 5
+					for i := 0; i < maxRetries; i++ {
+						log.WithFields(log.Fields{
+							"intentID": intentID,
+							"attempt":  i + 1,
+						}).Debug("Winner still not set, waiting for finalization")
+
+						time.Sleep(3 * time.Second)
+
+						intent, err = client.GetIntent(ctx, intentID)
+						if err != nil {
+							log.WithError(err).Warn("Failed to get intent while waiting for finalization")
+							continue
+						}
+
+						if intent.WinningSolver != (common.Address{}.Hex()) {
+							log.WithField("intentID", intentID).Debug("Winner set after waiting")
+							break
+						}
 					}
 				}
 
@@ -794,17 +847,8 @@ func (s *Solver) handleAuctionWon(ctx context.Context, networkKey string, intent
 }
 
 // solveIntentOnDestinationChain solves the intent on the destination network.
-// Determines destination chain using the chain pair mapping and executes solve transaction.
+// Uses the destChainId from the intent to determine destination chain.
 func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwork string, intentID *big.Int) {
-	destNetwork, ok := s.chainPairMap[sourceNetwork]
-	if !ok {
-		log.WithFields(log.Fields{
-			"sourceNetwork": sourceNetwork,
-			"intentID":      intentID,
-		}).Error("No destination chain configured for source network")
-		return
-	}
-
 	sourceClient := s.clients[sourceNetwork]
 	intent, err := sourceClient.GetIntent(ctx, intentID)
 	if err != nil {
@@ -812,16 +856,83 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 		return
 	}
 
-	recipients, amounts, err := s.getRecipientsFromRelayer(intentID.String())
+	// Use destChainId from intent to find destination network
+	destChainID := intent.DestChainId.String()
+	destClient, exists := s.clients[destChainID]
+	if !exists {
+		log.WithFields(log.Fields{
+			"intentID":    intentID,
+			"destChainId": destChainID,
+		}).Warn("Destination chain not configured for this solver, skipping")
+		return
+	}
+
+	destChainCfg, err := s.cfg.GetChainByID(intent.DestChainId)
 	if err != nil {
-		log.WithError(err).Error("Failed to get recipients from relayer")
+		log.WithError(err).Error("Failed to get destination chain config")
+		return
+	}
+	destNetwork := destChainCfg.Name
+
+	// Get source chain config to log chain ID
+	sourceChainCfg, err := s.cfg.GetChainByID(s.cfg.Chains[sourceNetwork].ChainID)
+	if err != nil {
+		log.WithError(err).Error("Failed to get source chain config")
+		return
+	}
+
+	log.WithFields(log.Fields{
+		"sourceNetwork": sourceNetwork,
+		"sourceChainID": sourceChainCfg.ChainID.String(),
+		"destNetwork":   destNetwork,
+		"destChainID":   destChainID,
+		"intentID":      intentID,
+		"tokenB":        intent.TokenB,
+	}).Info("Solving intent on destination chain")
+
+	// Wait for blockchain state to propagate before first attempt
+	// This is critical for slow chains like Sepolia and Base
+	log.WithField("intentID", intentID).Debug("Waiting for deposit state to propagate")
+	time.Sleep(5 * time.Second)
+
+	// Retry getting recipients with backoff to handle RPC propagation delays
+	var recipients []string
+	var amounts []string
+	var recipientsErr error
+	maxRetries := 8
+	for i := 0; i < maxRetries; i++ {
+		if i > 0 {
+			// Exponential backoff: 3s, 6s, 9s, 12s, 15s...
+			backoff := time.Duration(i) * 3 * time.Second
+			log.WithFields(log.Fields{
+				"intentID": intentID,
+				"attempt":  i + 1,
+				"backoff":  backoff,
+			}).Info("Retrying get recipients from relayer")
+			time.Sleep(backoff)
+		}
+
+		recipients, amounts, recipientsErr = s.getRecipientsFromRelayer(intentID.String())
+		if recipientsErr == nil {
+			break
+		}
+
+		log.WithFields(log.Fields{
+			"intentID": intentID,
+			"attempt":  i + 1,
+			"error":    recipientsErr.Error(),
+		}).Warn("Failed to get recipients, will retry")
+	}
+
+	if recipientsErr != nil {
+		log.WithError(recipientsErr).Error("Failed to get recipients from relayer after all retries")
 		return
 	}
 
 	log.WithFields(log.Fields{
 		"intentID":       intentID,
 		"recipientCount": len(recipients),
-	}).Debug("Retrieved recipients from relayer")
+	}).Info("Retrieved recipients from relayer")
 
 	recipientAddrs := make([]common.Address, len(recipients))
 	amountBigInts := make([]*big.Int, len(amounts))
@@ -837,7 +948,7 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 		totalAmount = new(big.Int).Add(totalAmount, amt)
 	}
 
-	destClient := s.clients[destNetwork]
+	// destClient already declared earlier in this function, reuse it
 
 	tokenBAddr := common.HexToAddress(intent.TokenB)
 	log.WithFields(log.Fields{
@@ -846,8 +957,8 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 		"totalAmount": totalAmount.String(),
 	}).Debug("Approving tokenB for solving on destination chain")
 
-	s.txMutexes[destNetwork].Lock()
-	defer s.txMutexes[destNetwork].Unlock()
+	s.txMutexes[destChainID].Lock()
+	defer s.txMutexes[destChainID].Unlock()
 
 	approveTx, err := s.retryTransaction(ctx, destNetwork, "approve-tokenB", func() (*ethtypes.Transaction, error) {
 		return destClient.ApproveToken(ctx, tokenBAddr, totalAmount)
@@ -941,6 +1052,7 @@ func (s *Solver) getRecipientsFromRelayer(intentID string) ([]string, []string, 
 }
 
 // settleIntent calls the relayer to settle an intent on the source chain
+// Retries with exponential backoff to handle RPC propagation delays on slow chains like Sepolia
 func (s *Solver) settleIntent(ctx context.Context, network string, chain1IntentID, chain2IntentID *big.Int, solverAddr common.Address) {
 	settleReq := types.SettleRequest{
 		IntentID:         chain1IntentID.String(),
@@ -957,44 +1069,95 @@ func (s *Solver) settleIntent(ctx context.Context, network string, chain1IntentI
 	}
 
 	url := fmt.Sprintf("%s/settle", s.cfg.RelayerURL)
-	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
-	if err != nil {
-		log.WithError(err).Error("Failed to call settle endpoint")
-		return
-	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		log.WithFields(log.Fields{
-			"status":   resp.StatusCode,
-			"response": string(bodyBytes),
-		}).Error("Settle request failed")
-		return
-	}
+	// Retry settle with exponential backoff (Sepolia and Base can be slow)
+	maxRetries := 5
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(attempt) * 5 * time.Second
+			log.WithFields(log.Fields{
+				"intentID": chain1IntentID,
+				"attempt":  attempt + 1,
+				"backoff":  backoff,
+			}).Info("Retrying settle request after backoff")
+			time.Sleep(backoff)
+		}
 
-	var settleResp types.RelayerResponse
-	if err := json.NewDecoder(resp.Body).Decode(&settleResp); err != nil {
-		log.WithError(err).Error("Failed to decode settle response")
-		return
-	}
+		resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+		if err != nil {
+			log.WithFields(log.Fields{
+				"intentID": chain1IntentID,
+				"attempt":  attempt + 1,
+				"error":    err.Error(),
+			}).Warn("Failed to call settle endpoint, will retry")
+			continue
+		}
 
-	if settleResp.Success {
+		if resp.StatusCode != http.StatusOK {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+
+			log.WithFields(log.Fields{
+				"intentID": chain1IntentID,
+				"attempt":  attempt + 1,
+				"status":   resp.StatusCode,
+				"response": string(bodyBytes),
+			}).Warn("Settle request failed, will retry")
+
+			// If it's the last attempt, log as error
+			if attempt == maxRetries-1 {
+				log.WithFields(log.Fields{
+					"intentID": chain1IntentID,
+					"status":   resp.StatusCode,
+					"response": string(bodyBytes),
+				}).Error("Settle request failed after all retries")
+			}
+			continue
+		}
+
+		var settleResp types.RelayerResponse
+		if err := json.NewDecoder(resp.Body).Decode(&settleResp); err != nil {
+			resp.Body.Close()
+			log.WithFields(log.Fields{
+				"intentID": chain1IntentID,
+				"attempt":  attempt + 1,
+				"error":    err.Error(),
+			}).Warn("Failed to decode settle response, will retry")
+			continue
+		}
+		resp.Body.Close()
+
+		if settleResp.Success {
+			log.WithFields(log.Fields{
+				"intentID": chain1IntentID,
+				"txHash":   settleResp.TransactionHash,
+				"attempts": attempt + 1,
+			}).Info("Intent settled successfully")
+
+			// Update status
+			key := fmt.Sprintf("%s-%s", network, chain1IntentID.String())
+			s.mu.Lock()
+			if status, ok := s.activeIntents[key]; ok {
+				status.Completed = true
+				status.Status = "completed"
+				status.LastUpdated = time.Now()
+			}
+			s.mu.Unlock()
+			return
+		}
+
+		// If response indicates failure but we got a response, log and retry
 		log.WithFields(log.Fields{
 			"intentID": chain1IntentID,
-			"txHash":   settleResp.TransactionHash,
-		}).Info("Intent settled successfully")
-
-		// Update status
-		key := fmt.Sprintf("%s-%s", network, chain1IntentID.String())
-		s.mu.Lock()
-		if status, ok := s.activeIntents[key]; ok {
-			status.Completed = true
-			status.Status = "completed"
-			status.LastUpdated = time.Now()
-		}
-		s.mu.Unlock()
+			"attempt":  attempt + 1,
+			"error":    settleResp.Error,
+		}).Warn("Settle returned unsuccessful response, will retry")
 	}
+
+	log.WithFields(log.Fields{
+		"intentID":   chain1IntentID,
+		"maxRetries": maxRetries,
+	}).Error("Failed to settle intent after all retries")
 }
 
 func (s *Solver) Close() {

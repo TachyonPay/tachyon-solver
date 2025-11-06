@@ -27,8 +27,8 @@ func main() {
 	}
 
 	log.WithFields(log.Fields{
-		"networks": len(cfg.Networks),
-		"port":     cfg.RelayerPort,
+		"chains": len(cfg.Chains),
+		"port":   cfg.RelayerPort,
 	}).Info("Configuration loaded")
 
 	relayerInstance, err := relayer.NewRelayer(cfg)

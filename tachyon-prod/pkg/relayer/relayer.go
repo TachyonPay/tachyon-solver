@@ -31,20 +31,24 @@ func NewRelayer(cfg *config.Config) (*Relayer, error) {
 	clients := make(map[string]*blockchain.Client)
 	txMutexes := make(map[string]*sync.Mutex)
 
-	for networkKey, networkCfg := range cfg.Networks {
+	// Initialize clients for each configured chain
+	for chainID, chainCfg := range cfg.Chains {
 		client, err := blockchain.NewClient(
-			networkCfg.RpcURL,
-			networkCfg.BridgeAddress,
+			chainCfg.RpcURL,
+			chainCfg.BridgeAddress,
 			cfg.PrivateKey,
-			networkCfg.ChainID,
-			networkCfg.Name,
+			chainCfg.ChainID,
+			chainCfg.Name,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create client for %s: %w", networkKey, err)
+			return nil, fmt.Errorf("failed to create client for chain %s (%s): %w", chainCfg.Name, chainID, err)
 		}
-		clients[networkKey] = client
-		txMutexes[networkKey] = &sync.Mutex{}
-		log.WithField("network", networkKey).Info("Relayer blockchain client initialized")
+		clients[chainID] = client
+		txMutexes[chainID] = &sync.Mutex{}
+		log.WithFields(log.Fields{
+			"chain":   chainCfg.Name,
+			"chainID": chainID,
+		}).Info("Relayer blockchain client initialized")
 	}
 
 	return &Relayer{
@@ -57,6 +61,7 @@ func NewRelayer(cfg *config.Config) (*Relayer, error) {
 }
 
 // StoreRecipients stores recipient information for an intent (simulates TEE)
+// Uses composite key (sourceChainID-intentID) to handle same intent IDs across different chains
 func (r *Relayer) StoreRecipients(req *types.StoreRecipientsRequest) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -74,7 +79,23 @@ func (r *Relayer) StoreRecipients(req *types.StoreRecipientsRequest) error {
 		totalAmount.Add(totalAmount, amount)
 	}
 
-	r.recipientStore[req.IntentID] = &types.RecipientInfo{
+	// Find the source chain for this chainID to create composite key
+	var sourceChainID int64
+	for _, cfg := range r.cfg.Chains {
+		if cfg.ChainID.Int64() == req.ChainID {
+			sourceChainID = cfg.ChainID.Int64()
+			break
+		}
+	}
+	if sourceChainID == 0 {
+		return fmt.Errorf("unknown chain ID: %d", req.ChainID)
+	}
+
+	// Create composite key: sourceChainID-intentID
+	// This ensures intents with same ID on different chains don't collide
+	storeKey := fmt.Sprintf("%d-%s", sourceChainID, req.IntentID)
+
+	r.recipientStore[storeKey] = &types.RecipientInfo{
 		Success:     true,
 		IntentID:    req.IntentID,
 		Recipients:  req.Recipients,
@@ -85,7 +106,9 @@ func (r *Relayer) StoreRecipients(req *types.StoreRecipientsRequest) error {
 	}
 
 	log.WithFields(log.Fields{
+		"storeKey":   storeKey,
 		"intentID":   req.IntentID,
+		"chainID":    req.ChainID,
 		"recipients": len(req.Recipients),
 		"totalAmount": totalAmount.String(),
 	}).Info("Stored recipient information")
@@ -109,36 +132,41 @@ func (r *Relayer) GetRecipients(intentID string) (*types.RecipientInfo, error) {
 // GetRecipientsForWinner retrieves recipients only if the requester is the winning solver.
 // Verifies that the solver has deposited before granting access to recipient information.
 func (r *Relayer) GetRecipientsForWinner(ctx context.Context, intentID string, requesterAddr string) (*types.RecipientInfo, error) {
-	r.mu.RLock()
-	info, ok := r.recipientStore[intentID]
-	chainID := info.ChainID
-	r.mu.RUnlock()
-
-	if !ok {
-		return nil, fmt.Errorf("recipients not found for intent %s", intentID)
-	}
-
-	var sourceNetwork string
-	for key, cfg := range r.cfg.Networks {
-		if cfg.ChainID.Int64() != chainID {
-			sourceNetwork = key
-			break
-		}
-	}
-
-	if sourceNetwork == "" {
-		return nil, fmt.Errorf("could not determine source network")
-	}
-
-	client := r.clients[sourceNetwork]
 	intentIDBig, ok := new(big.Int).SetString(intentID, 10)
 	if !ok {
 		return nil, fmt.Errorf("invalid intent ID")
 	}
 
-	intent, err := client.GetIntent(ctx, intentIDBig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get intent from blockchain: %w", err)
+	// The intent could be on any source chain, so we need to check all chains
+	// to find where this intent was created and verify the winning solver
+	var intent *types.Intent
+	var sourceChainID int64
+	var intentErr error
+
+	for networkKey, client := range r.clients {
+		tempIntent, err := client.GetIntent(ctx, intentIDBig)
+		if err == nil && tempIntent.User != "" {
+			// Found the intent on this chain
+			intent = tempIntent
+			sourceChainID = r.cfg.Chains[networkKey].ChainID.Int64()
+			intentErr = nil
+			log.WithFields(log.Fields{
+				"intentID":      intentID,
+				"network":       networkKey,
+				"sourceChainID": sourceChainID,
+			}).Debug("Found intent on source chain")
+			break
+		}
+		if err != nil {
+			intentErr = err
+		}
+	}
+
+	if intent == nil {
+		if intentErr != nil {
+			return nil, fmt.Errorf("failed to get intent from blockchain: %w", intentErr)
+		}
+		return nil, fmt.Errorf("intent %s not found on any chain", intentID)
 	}
 
 	if !intent.Deposited {
@@ -157,6 +185,22 @@ func (r *Relayer) GetRecipientsForWinner(ctx context.Context, intentID string, r
 		}).Warn("Unauthorized recipient access attempt")
 		return nil, fmt.Errorf("access denied: not the winning solver for this intent")
 	}
+
+	// Retrieve from store using composite key
+	storeKey := fmt.Sprintf("%d-%s", sourceChainID, intentID)
+	r.mu.RLock()
+	info, ok := r.recipientStore[storeKey]
+	r.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("recipients not found for intent %s on chain %d", intentID, sourceChainID)
+	}
+
+	log.WithFields(log.Fields{
+		"intentID":      intentID,
+		"sourceChainID": sourceChainID,
+		"storeKey":      storeKey,
+	}).Debug("Retrieved recipients for winning solver")
 
 	return info, nil
 }
@@ -212,6 +256,7 @@ func (r *Relayer) VerifyIntentSolved(ctx context.Context, network string, intent
 // SettleIntent settles an intent with basic verification on the source chain.
 // Verifies the intent is solved on the destination chain before settling.
 func (r *Relayer) SettleIntent(ctx context.Context, req *types.SettleRequest) (*types.RelayerResponse, error) {
+	// Get client by chain ID (req.Network is chain ID string like "845320009")
 	client, ok := r.clients[req.Network]
 	if !ok {
 		return &types.RelayerResponse{
@@ -241,21 +286,42 @@ func (r *Relayer) SettleIntent(ctx context.Context, req *types.SettleRequest) (*
 
 	var solved bool
 	var err error
-	maxRetries := 3
+	// Increase retries for slow RPC propagation on Sepolia and Base
+	maxRetries := 10
 	for i := 0; i < maxRetries; i++ {
 		if i > 0 {
-			time.Sleep(time.Duration(i) * 2 * time.Second)
+			// Exponential backoff: 3s, 6s, 9s, 12s, 15s...
+			backoff := time.Duration(i) * 3 * time.Second
+			log.WithFields(log.Fields{
+				"attempt": i + 1,
+				"backoff": backoff,
+				"intentID": req.Chain2IntentID,
+				"destNetwork": destNetwork,
+			}).Debug("Retrying verification after backoff")
+			time.Sleep(backoff)
 		}
 
 		solved, err = r.VerifyIntentSolved(ctx, destNetwork, req.Chain2IntentID)
 		if err != nil {
-			log.WithError(err).Warn("Verification attempt failed")
+			log.WithFields(log.Fields{
+				"attempt": i + 1,
+				"error": err.Error(),
+			}).Warn("Verification attempt failed")
 			continue
 		}
 
 		if solved {
+			log.WithFields(log.Fields{
+				"attempt": i + 1,
+				"intentID": req.Chain2IntentID,
+			}).Info("Intent verified as solved")
 			break
 		}
+
+		log.WithFields(log.Fields{
+			"attempt": i + 1,
+			"intentID": req.Chain2IntentID,
+		}).Debug("Intent not solved yet, will retry")
 	}
 
 	if err != nil {
@@ -306,11 +372,50 @@ func (r *Relayer) SettleIntent(ctx context.Context, req *types.SettleRequest) (*
 	}, nil
 }
 
-func (r *Relayer) getDestinationNetwork(sourceNetwork string) string {
-	if sourceNetwork == "horizen" {
-		return "base"
+func (r *Relayer) getDestinationNetwork(sourceNetworkKey string) string {
+	// sourceNetworkKey is a chain ID string like "845320009"
+	// We need to find the destination chain ID for verification
+
+	// Get source chain config to find its destination
+	sourceChainCfg, ok := r.cfg.Chains[sourceNetworkKey]
+	if !ok {
+		log.WithField("sourceNetworkKey", sourceNetworkKey).Warn("Source network not found in config")
+		return ""
 	}
-	return "horizen"
+
+	// For now, use simple logic: if source is horizen, dest is base, otherwise dest is horizen
+	// In future, this should be more flexible based on intent.DestChainId
+	if sourceChainCfg.Name == "horizen" {
+		// Find base chain ID
+		for chainID, cfg := range r.cfg.Chains {
+			if cfg.Name == "base" {
+				return chainID
+			}
+		}
+	} else if sourceChainCfg.Name == "base" {
+		// Find horizen chain ID
+		for chainID, cfg := range r.cfg.Chains {
+			if cfg.Name == "horizen" {
+				return chainID
+			}
+		}
+	} else if sourceChainCfg.Name == "sepolia" {
+		// Find horizen chain ID (most intents from sepolia go to horizen)
+		for chainID, cfg := range r.cfg.Chains {
+			if cfg.Name == "horizen" {
+				return chainID
+			}
+		}
+	}
+
+	// Default fallback: return first available chain that's not the source
+	for chainID := range r.cfg.Chains {
+		if chainID != sourceNetworkKey {
+			return chainID
+		}
+	}
+
+	return ""
 }
 
 // retryTransaction retries a transaction function up to maxRetries times on nonce errors
@@ -428,11 +533,24 @@ func (r *Relayer) RegisterSolver(req *types.RegisterSolverRequest) (*types.Regis
 	}, nil
 }
 
+// getClientByName retrieves a blockchain client by chain name
+func (r *Relayer) getClientByName(chainName string) (*blockchain.Client, error) {
+	// Look up client by matching chain name in config
+	for chainID, chainCfg := range r.cfg.Chains {
+		if chainCfg.Name == chainName {
+			if client, ok := r.clients[chainID]; ok {
+				return client, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("chain %s not found", chainName)
+}
+
 // checkTokenBalance checks the token balance of a solver on a specific chain
 func (r *Relayer) checkTokenBalance(chainName, solverAddress, tokenAddress string) (*types.SolverBalance, error) {
-	client, ok := r.clients[chainName]
-	if !ok {
-		return nil, fmt.Errorf("chain %s not found", chainName)
+	client, err := r.getClientByName(chainName)
+	if err != nil {
+		return nil, err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -520,7 +638,7 @@ func (r *Relayer) GetNetworks() []string {
 
 func (r *Relayer) GetChainInfo() map[string]string {
 	info := make(map[string]string)
-	for networkKey, cfg := range r.cfg.Networks {
+	for networkKey, cfg := range r.cfg.Chains {
 		info[networkKey] = fmt.Sprintf("Chain %s (ID: %s)", cfg.Name, cfg.ChainID.String())
 	}
 	return info

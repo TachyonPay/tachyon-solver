@@ -162,7 +162,7 @@ func GenerateRandomAddress() common.Address {
 	return crypto.PubkeyToAddress(*publicKeyECDSA)
 }
 
-// ParseEther converts ether amount to wei
+// ParseEther converts ether amount to wei (18 decimals)
 func ParseEther(ether string) *big.Int {
 	eth := new(big.Float)
 	eth.SetString(ether)
@@ -171,6 +171,21 @@ func ParseEther(ether string) *big.Int {
 	result := new(big.Int)
 	wei.Int(result)
 	return result
+}
+
+// ParseToken converts token amount to smallest unit with custom decimals
+// For example: ParseToken("100", 6) = 100000000 (for USDC with 6 decimals)
+func ParseToken(amount string, decimals int) *big.Int {
+	val := new(big.Float)
+	val.SetString(amount)
+	multiplier := new(big.Float).SetFloat64(1)
+	for i := 0; i < decimals; i++ {
+		multiplier.Mul(multiplier, big.NewFloat(10))
+	}
+	result := new(big.Float).Mul(val, multiplier)
+	resultInt := new(big.Int)
+	result.Int(resultInt)
+	return resultInt
 }
 
 // FormatEther converts wei to ether string

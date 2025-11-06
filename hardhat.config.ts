@@ -6,7 +6,16 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const config: HardhatUserConfig = {
-  solidity: "0.8.28",
+  solidity: {
+    version: "0.8.28",
+    settings: {
+      optimizer: {
+        enabled: true,
+        runs: 200,
+      },
+      viaIR: true, // Enable IR-based compilation to avoid stack too deep errors
+    },
+  },
   networks: {
     hardhat: {
       // Default Hardhat network
@@ -24,9 +33,16 @@ const config: HardhatUserConfig = {
       gasPrice: "auto",
     },
     sepolia: {
-      url: process.env.SEPOLIA_RPC_URL || "",
+      url: process.env.SEPOLIA_RPC_URL || "https://ethereum-sepolia.rpc.subquery.network/public",
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
       chainId: 11155111,
+      gasPrice: "auto",
+    },
+    arbitrum_sepolia: {
+      url: process.env.ARBITRUM_SEPOLIA_RPC_URL || "https://arbitrum-sepolia.gateway.tenderly.co",
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+      chainId: 421614,
+      gasPrice: "auto",
     },
     goerli: {
       url: process.env.GOERLI_RPC_URL || "",
@@ -45,7 +61,8 @@ const config: HardhatUserConfig = {
       sepolia: process.env.ETHERSCAN_API_KEY || "",
       goerli: process.env.ETHERSCAN_API_KEY || "",
       horizen_testnet: "not-needed", // Custom network, may not need API key
-      base_sepolia: process.env.BASESCAN_API_KEY || "not-needed"
+      base_sepolia: process.env.BASESCAN_API_KEY || "not-needed",
+      arbitrum_sepolia: process.env.ARBISCAN_API_KEY || "not-needed"
     },
     customChains: [
       {
@@ -62,6 +79,14 @@ const config: HardhatUserConfig = {
         urls: {
           apiURL: "https://sepolia-explorer.base.org/api",
           browserURL: "https://sepolia-explorer.base.org/"
+        }
+      },
+      {
+        network: "arbitrum_sepolia",
+        chainId: 421614,
+        urls: {
+          apiURL: "https://api-sepolia.arbiscan.io/api",
+          browserURL: "https://sepolia.arbiscan.io/"
         }
       }
     ]

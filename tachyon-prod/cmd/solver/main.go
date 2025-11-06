@@ -27,8 +27,8 @@ func main() {
 	}
 
 	log.WithFields(log.Fields{
-		"networks": len(cfg.Networks),
-		"port":     cfg.SolverPort,
+		"chains": len(cfg.Chains),
+		"port":   cfg.SolverPort,
 	}).Info("Configuration loaded")
 
 	solverInstance, err := solver.NewSolver(cfg)

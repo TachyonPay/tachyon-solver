@@ -17,6 +17,7 @@ contract BridgeIntent is ReentrancyGuard, Ownable {
         uint256 amountA;
         uint256 expectedAmountB;
         uint256 reward;
+        uint256 destChainId;  // Destination chain ID where tokens should be delivered
         uint256 endTime;
         address winningSolver;
         uint256 winningBid;
@@ -51,6 +52,7 @@ contract BridgeIntent is ReentrancyGuard, Ownable {
         uint256 amountA,
         uint256 expectedAmountB,
         uint256 reward,
+        uint256 destChainId,
         uint256 endTime
     );
 
@@ -156,10 +158,11 @@ contract BridgeIntent is ReentrancyGuard, Ownable {
     /**
      * @dev Create a new bridging intent
      * @param _tokenA Source token address
-     * @param _tokenB Destination token address  
+     * @param _tokenB Destination token address
      * @param _amountA Amount of source token to bridge
      * @param _expectedAmountB Expected amount of destination token
      * @param _reward Reward amount for the solver
+     * @param _destChainId Destination chain ID where tokens should be delivered
      * @param _auctionDuration Duration of the auction in seconds
      */
     function createIntent(
@@ -168,11 +171,13 @@ contract BridgeIntent is ReentrancyGuard, Ownable {
         uint256 _amountA,
         uint256 _expectedAmountB,
         uint256 _reward,
+        uint256 _destChainId,
         uint256 _auctionDuration
     ) external nonReentrant {
         require(_tokenA != address(0) && _tokenB != address(0), "Invalid token addresses");
         require(_amountA > 0 && _expectedAmountB > 0, "Invalid amounts");
         require(_reward > 0, "Invalid reward");
+        require(_destChainId > 0, "Invalid destination chain ID");
         require(_auctionDuration >= MIN_AUCTION_DURATION && _auctionDuration <= MAX_AUCTION_DURATION, "Invalid auction duration");
 
         uint256 intentId = nextIntentId++;
@@ -192,6 +197,7 @@ contract BridgeIntent is ReentrancyGuard, Ownable {
             amountA: _amountA,
             expectedAmountB: _expectedAmountB,
             reward: _reward,
+            destChainId: _destChainId,
             endTime: endTime,
             winningSolver: address(0),
             winningBid: 0,
@@ -207,6 +213,7 @@ contract BridgeIntent is ReentrancyGuard, Ownable {
             _amountA,
             _expectedAmountB,
             _reward,
+            _destChainId,
             endTime
         );
     }
@@ -500,6 +507,7 @@ contract BridgeIntent is ReentrancyGuard, Ownable {
         uint256 amountA,
         uint256 expectedAmountB,
         uint256 reward,
+        uint256 destChainId,
         uint256 endTime,
         bool completed,
         address user,
@@ -513,6 +521,7 @@ contract BridgeIntent is ReentrancyGuard, Ownable {
             intent.amountA,
             intent.expectedAmountB,
             intent.reward,
+            intent.destChainId,
             intent.endTime,
             intent.completed,
             intent.user,

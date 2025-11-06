@@ -13,11 +13,8 @@ import (
 
 // Config holds all application configuration
 type Config struct {
-	// Network configurations (maintained for backward compatibility)
-	Networks map[string]types.NetworkConfig
-
-	// Chain pairs (new multi-pair support)
-	ChainPairs []types.ChainPair
+	// Chain configurations - key is chain ID as string
+	Chains map[string]types.NetworkConfig
 
 	// Solver configuration
 	SolverConfig types.SolverConfig
@@ -36,62 +33,46 @@ func LoadConfig() (*Config, error) {
 	godotenv.Load()
 
 	cfg := &Config{
-		Networks:   make(map[string]types.NetworkConfig),
-		ChainPairs: []types.ChainPair{},
+		Chains: make(map[string]types.NetworkConfig),
 	}
 
-	pairCountStr := getEnv("PAIR_COUNT", "1")
-	pairCount, err := strconv.Atoi(pairCountStr)
-	if err != nil || pairCount < 1 || pairCount > 10 {
-		return nil, fmt.Errorf("PAIR_COUNT must be between 1 and 10, got: %s", pairCountStr)
+	// Load chain configurations
+	// Chain count determines how many chains the solver supports
+	chainCountStr := getEnv("CHAIN_COUNT", "3")
+	chainCount, err := strconv.Atoi(chainCountStr)
+	if err != nil || chainCount < 1 || chainCount > 20 {
+		return nil, fmt.Errorf("CHAIN_COUNT must be between 1 and 20, got: %s", chainCountStr)
 	}
 
-	for i := 1; i <= pairCount; i++ {
-		prefix := fmt.Sprintf("PAIR_%d_", i)
+	for i := 1; i <= chainCount; i++ {
+		prefix := fmt.Sprintf("CHAIN_%d_", i)
 
-		sourceChainID, ok := new(big.Int).SetString(getEnv(prefix+"SOURCE_CHAIN_ID", ""), 10)
-		if !ok {
-			return nil, fmt.Errorf("invalid %sSOURCE_CHAIN_ID", prefix)
+		chainIDStr := getEnv(prefix+"ID", "")
+		chainID, ok := new(big.Int).SetString(chainIDStr, 10)
+		if !ok || chainID.Cmp(big.NewInt(0)) == 0 {
+			return nil, fmt.Errorf("invalid or missing %sID: %s", prefix, chainIDStr)
 		}
 
-		destChainID, ok := new(big.Int).SetString(getEnv(prefix+"DEST_CHAIN_ID", ""), 10)
-		if !ok {
-			return nil, fmt.Errorf("invalid %sDEST_CHAIN_ID", prefix)
+		bridgeAddr := getEnv(prefix+"BRIDGE", "")
+		if !common.IsHexAddress(bridgeAddr) {
+			return nil, fmt.Errorf("invalid %sBRIDGE address: %s", prefix, bridgeAddr)
 		}
 
-		sourceBridge := getEnv(prefix+"SOURCE_BRIDGE", "")
-		if !common.IsHexAddress(sourceBridge) {
-			return nil, fmt.Errorf("invalid %sSOURCE_BRIDGE address: %s", prefix, sourceBridge)
+		rpcURL := getEnv(prefix+"RPC", "")
+		if rpcURL == "" {
+			return nil, fmt.Errorf("missing %sRPC", prefix)
 		}
 
-		destBridge := getEnv(prefix+"DEST_BRIDGE", "")
-		if !common.IsHexAddress(destBridge) {
-			return nil, fmt.Errorf("invalid %sDEST_BRIDGE address: %s", prefix, destBridge)
+		chainConfig := types.NetworkConfig{
+			Name:          getEnv(prefix+"NAME", fmt.Sprintf("chain-%s", chainIDStr)),
+			RpcURL:        rpcURL,
+			ChainID:       chainID,
+			BridgeAddress: bridgeAddr,
+			Explorer:      getEnv(prefix+"EXPLORER", ""),
 		}
 
-		sourceChain := types.NetworkConfig{
-			Name:          getEnv(prefix+"SOURCE_CHAIN", ""),
-			RpcURL:        getEnv(prefix+"SOURCE_RPC", ""),
-			ChainID:       sourceChainID,
-			BridgeAddress: sourceBridge,
-			Explorer:      getEnv(prefix+"SOURCE_EXPLORER", ""),
-		}
-
-		destChain := types.NetworkConfig{
-			Name:          getEnv(prefix+"DEST_CHAIN", ""),
-			RpcURL:        getEnv(prefix+"DEST_RPC", ""),
-			ChainID:       destChainID,
-			BridgeAddress: destBridge,
-			Explorer:      getEnv(prefix+"DEST_EXPLORER", ""),
-		}
-
-		cfg.ChainPairs = append(cfg.ChainPairs, types.ChainPair{
-			SourceChain: sourceChain,
-			DestChain:   destChain,
-		})
-
-		cfg.Networks[sourceChain.Name] = sourceChain
-		cfg.Networks[destChain.Name] = destChain
+		// Use chain ID as the map key
+		cfg.Chains[chainIDStr] = chainConfig
 	}
 
 	// Load solver configuration
@@ -143,4 +124,13 @@ func getEnv(key, defaultValue string) string {
 		return defaultValue
 	}
 	return value
+}
+
+// GetChainByID retrieves a chain configuration by chain ID
+func (c *Config) GetChainByID(chainID *big.Int) (types.NetworkConfig, error) {
+	chain, exists := c.Chains[chainID.String()]
+	if !exists {
+		return types.NetworkConfig{}, fmt.Errorf("chain ID %s not configured", chainID.String())
+	}
+	return chain, nil
 }
