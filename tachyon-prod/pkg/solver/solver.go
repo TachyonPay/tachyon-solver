@@ -500,6 +500,18 @@ func (s *Solver) calculateProfitableBid(ctx context.Context, networkKey string, 
 
 	targetBid, _ := targetBidFloat.Int(nil)
 
+	// Ensure bid is not negative (which would wrap around to MAX_UINT256)
+	if targetBid.Sign() <= 0 {
+		log.WithFields(log.Fields{
+			"minBid":       minBid.String(),
+			"profitMargin": s.cfg.SolverConfig.MinProfitMargin,
+			"decimals":     decimals,
+			"gasBuffer":    gasBuffer.String(),
+			"targetBid":    targetBid.String(),
+		}).Info("Calculated bid is negative or zero, not profitable")
+		return false, nil
+	}
+
 	log.WithFields(log.Fields{
 		"minBid":       minBid.String(),
 		"profitMargin": s.cfg.SolverConfig.MinProfitMargin,
