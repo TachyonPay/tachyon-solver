@@ -211,9 +211,10 @@ func main() {
 
 	// Wait for solver to process all intents
 	fmt.Println(strings.Repeat("=", 80))
-	fmt.Printf("⏳ Waiting %d seconds for solver to process all intents...\n", cfg.AuctionDuration+20)
+	fmt.Printf("⏳ Waiting 4 minutes for solver to process all intents...\n")
+	fmt.Println("   (1 minute per intent for bidding, solving, and settling)")
 	fmt.Println(strings.Repeat("=", 80))
-	time.Sleep(time.Duration(cfg.AuctionDuration+20) * time.Second)
+	time.Sleep(4 * time.Minute)
 
 	// Verify all intents
 	fmt.Println("\n" + strings.Repeat("=", 80))
@@ -223,6 +224,26 @@ func main() {
 	successCount := 0
 	for i, intent := range createdIntents {
 		fmt.Printf("\n📊 Intent %d: %s → %s (ID: %s)\n", i+1, intent.SourceChain, intent.DestChain, intent.IntentID)
+
+		// Fetch settlement details from relayer with retries (24 retries × 10 seconds = 4 minutes total)
+		settlementDetails, err := getIntentDetailsWithRetries(cfg.RelayerURL, intent.IntentID.String(), tests[i].SourceChainID.String(), 24, 10*time.Second)
+		if err != nil {
+			fmt.Printf("   ⚠️  Failed to fetch settlement details from relayer after retries: %v\n", err)
+		} else {
+			fmt.Printf("   Relayer Status: %s\n", settlementDetails.Status)
+			if settlementDetails.DepositTxHash != "" {
+				fmt.Printf("   Deposit Tx: %s\n", settlementDetails.DepositTxHash)
+			}
+			if settlementDetails.SolveTxHash != "" {
+				fmt.Printf("   Solve Tx: %s\n", settlementDetails.SolveTxHash)
+			}
+			if settlementDetails.SettleTxHash != "" {
+				fmt.Printf("   Settle Tx: %s\n", settlementDetails.SettleTxHash)
+			}
+			if settlementDetails.SolverAddress != "" {
+				fmt.Printf("   Solver: %s\n", settlementDetails.SolverAddress)
+			}
+		}
 
 		// Check source chain status
 		sourceCompleted := checkIntentCompleted(ctx, intent.SourceBridge, intent.IntentID)
@@ -566,4 +587,80 @@ func storeRecipients(relayerURL, intentID string, recipients, amounts []string, 
 	}
 
 	return nil
+}
+
+// IntentDetails represents the settlement details from the relayer
+type IntentDetails struct {
+	IntentID      string `json:"intentId"`
+	SourceChainID string `json:"sourceChainId"`
+	DestChainID   string `json:"destChainId"`
+	SolverAddress string `json:"solverAddress"`
+	DepositTxHash string `json:"depositTxHash,omitempty"`
+	SolveTxHash   string `json:"solveTxHash,omitempty"`
+	SettleTxHash  string `json:"settleTxHash,omitempty"`
+	Status        string `json:"status"` // "pending", "solving", "settled", "completed"
+}
+
+// getIntentDetailsFromRelayer fetches settlement details from the relayer
+func getIntentDetailsFromRelayer(relayerURL, intentID, sourceChainID string) (*IntentDetails, error) {
+	url := fmt.Sprintf("%s/intent-details/%s?sourceChainId=%s", relayerURL, intentID, sourceChainID)
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch intent details: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to fetch intent details (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Success bool           `json:"success"`
+		Intent  *IntentDetails `json:"intent,omitempty"`
+		Error   string         `json:"error,omitempty"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if !result.Success {
+		return nil, fmt.Errorf("relayer returned error: %s", result.Error)
+	}
+
+	return result.Intent, nil
+}
+
+// getIntentDetailsWithRetries fetches settlement details with retry logic
+func getIntentDetailsWithRetries(relayerURL, intentID, sourceChainID string, maxRetries int, retryInterval time.Duration) (*IntentDetails, error) {
+	var lastErr error
+
+	for i := 0; i < maxRetries; i++ {
+		if i > 0 {
+			fmt.Printf("   ⏳ Retry %d/%d: Checking settlement status (waiting %v)...\n", i, maxRetries-1, retryInterval)
+			time.Sleep(retryInterval)
+		}
+
+		details, err := getIntentDetailsFromRelayer(relayerURL, intentID, sourceChainID)
+		if err == nil {
+			// Successfully fetched details
+			if i > 0 {
+				fmt.Printf("   ✅ Settlement details fetched after %d retries\n", i)
+			}
+
+			// Check if intent is in a final state (completed or settled)
+			if details.Status == "completed" || details.Status == "settled" {
+				return details, nil
+			}
+
+			// Intent exists but not yet completed, continue retrying
+			lastErr = fmt.Errorf("intent status: %s (not yet completed)", details.Status)
+			continue
+		}
+
+		lastErr = err
+	}
+
+	return nil, fmt.Errorf("failed after %d retries: %w", maxRetries, lastErr)
 }

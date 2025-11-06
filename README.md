@@ -1,59 +1,60 @@
-# Bridge Solver with zkVerify & TEE Privacy Architecture
+# ZK-Tachyon: Privacy-Preserving Cross-Chain Bridge Solver
 
-A privacy-preserving cross-chain bridge solver that leverages **zkVerify** for zero-knowledge proof verification and **Trusted Execution Environments (TEE)** for anonymous address management, ensuring complete privacy for users bridging assets between Horizen and Base networks.
+A privacy-first cross-chain bridge solver that uses **ECIES encryption within TEE** for anonymous address management and provides instant, secure bridging between multiple blockchain networks.
 
-## 🚨 Problem Statement
+## Problem Statement
 
-Existing cross-chain bridge solutions face critical limitations that our architecture addresses:
+Existing cross-chain bridge solutions face critical limitations:
 
-### ⏳ **Traditional Bridges: Finality Delays**
+### Traditional Bridges: Finality Delays
 - **Problem**: Conventional bridges wait for block finality (15+ minutes on Ethereum, longer on other chains)
 - **Impact**: Users experience significant delays, poor UX, and capital inefficiency
 - **Our Solution**: Intent-based architecture with competitive solver auctions enables near-instant bridging
 
-### 🔒 **Intent-Based Solutions: Escrow & Secret Complexity**
+### Intent-Based Solutions: Escrow & Secret Complexity
 - **Problem**: Solutions like 1inch Fusion use complex escrow mechanisms and secret management
-- **Issues**: 
+- **Issues**:
   - Difficult implementation and maintenance
   - No privacy preservation for users
   - Centralized secret management creates vulnerabilities
-- **Our Solution**: TEE-based anonymous address management eliminates complex escrows while ensuring complete privacy
+- **Our Solution**: TEE-based anonymous address management with ECIES encryption eliminates complex escrows while ensuring complete privacy
 
-### 🐌 **Oracle-Based Solutions: Settlement Delays**  
+### Oracle-Based Solutions: Settlement Delays
 - **Problem**: Across Protocol uses UMA's optimistic oracle system
 - **Issues**:
   - Long challenge periods (2+ hours) before settlement
   - Solvers face liquidity uncertainty and delayed capital recovery
   - Inconsistent liquidity provision due to settlement delays
-- **Our Solution**: zkVerify provides immediate cryptographic proof verification, enabling fast and consistent settlement
+- **Our Solution**: On-chain verification provides immediate settlement, enabling fast and consistent finality
 
-### 🕵️ **Privacy Gaps Across All Solutions**
+### Privacy Gaps Across All Solutions
 - **Problem**: Existing bridges link user identities across chains
 - **Impact**: Complete transaction history correlation, privacy violations
-- **Our Solution**: TEE-based anonymous address storage completely breaks user identity links
+- **Our Solution**: TEE-based anonymous address storage with ECIES encryption completely breaks user identity links
 
-## ✅ **Our Comprehensive Solution**
+## Our Comprehensive Solution
 
 | Problem | Traditional Bridges | Intent Solutions | Oracle Solutions | **Our Solution** |
 |---------|-------------------|------------------|------------------|------------------|
 | **Speed** | 15+ min finality | Fast execution | 2+ hour delays | **Near-instant** |
-| **Privacy** | ❌ No privacy | ❌ No privacy | ❌ No privacy | **✅ Complete privacy** |
+| **Privacy** | No privacy | No privacy | No privacy | **Complete privacy** |
 | **Complexity** | High | Very High | Medium | **Low with TEE** |
 | **Liquidity** | Locked capital | Escrow complexity | Delayed recovery | **Fast settlement** |
 | **Trust** | Bridge operators | Escrow contracts | Oracle disputes | **Cryptographic proofs** |
 
-## 🏗️ Architecture Overview
+## Architecture Overview
 
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   User (Chain1) │    │   TEE Relayer    │    │ Solver (Chain2) │
-│    Horizen      │    │   Private Vault  │    │     Base        │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
+┌──────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│  User (Chain A)  │    │   TEE Relayer    │    │ Solver (Chain B)│
+│   Horizen/Base   │    │  ECIES Encrypted │    │  Base/Sepolia   │
+└──────────────────┘    └──────────────────┘    └─────────────────┘
          │                       │                       │
          │ 1. Create Intent      │                       │
-         │ + Anonymous Addresses │                       │
+         │ + ECIES Encrypted     │                       │
+         │   Anonymous Addresses │                       │
          │──────────────────────▶│                       │
-         │                       │ 2. Store Anon Data   │
+         │                       │ 2. Decrypt & Store   │
          │                       │    in TEE Enclave    │
          │                       │                       │
          │                       │ 3. Intent Created    │
@@ -64,209 +65,409 @@ Existing cross-chain bridge solutions face critical limitations that our archite
          │                       │    Auction & Solves  │
          │                       │                       │
          │                       │◀──────────────────────│ 5. Solve Intent
-         │                       │   Send TokenB to      │    on Chain2
-         │                       │   Anonymous Addresses │    (Base)
+         │                       │   Send TokenB to      │    on Chain B
+         │                       │   Anonymous Addresses │
          │                       │                       │
-         │                       │ 6. Monitor Chain2     │
-         │                       │    Light Client (LC)  │
-         │                       │    Generate zkProof   │
-         │                       │    of Chain2 Tx       │
+         │                       │ 6. Verify on-chain   │
+         │                       │    transaction        │
          │                       │                       │
-         │ 7. Verify Proof via   │                       │
-         │    zkVerify & Settle  │                       │
-         │    Funds on Chain1    │                       │
+         │ 7. Settle Intent      │                       │
+         │    on Chain A         │                       │
          │◀──────────────────────│                       │
          │                       │                       │
-         │                                               │
          └───────────────────────────────────────────────┘
-                    Cross-Chain Bridge Complete
-                   (User identity unlinkable)
+                Cross-Chain Bridge Complete
+               (User identity unlinkable)
 ```
 
-## 🔐 Privacy-First Design
+## ECIES Encryption in TEE Relayer
 
-### TEE-Based Anonymous Address Management
+### Overview
 
-The relayer operates within a **Trusted Execution Environment (TEE)** to ensure complete privacy:
+The relayer uses **Elliptic Curve Integrated Encryption Scheme (ECIES)** within a **Trusted Execution Environment (TEE)** to ensure complete privacy for users bridging assets.
 
-- **Secure Storage**: Anonymous recipient addresses are stored exclusively within the TEE enclave
-- **Zero Knowledge**: The relayer cannot access or leak recipient information outside the secure environment
-- **Link Breaking**: By using anonymous addresses generated by users, we completely break the link between the user's identity on Horizen and their activity on Base
-- **Attestation**: TEE provides cryptographic proof that the code is running in a secure, unmodified environment
+### How ECIES Works
 
-### zkVerify Integration
+ECIES is a hybrid encryption scheme that combines:
+- **Elliptic Curve Cryptography (ECC)** for key exchange
+- **Symmetric encryption** (AES-256-GCM) for data encryption
+- **HMAC** for authentication
 
-**zkVerify** is used to verify zero-knowledge proofs generated by the light client:
+### Implementation in Relayer
 
-1. **Light Client Proof Generation**: When the solver completes an intent on Chain2, the relayer's light client generates a zero-knowledge proof of the transaction
-2. **zkVerify Verification**: The proof is submitted to zkVerify for verification without revealing transaction details
-3. **Settlement with Proof**: The relayer uses the `/settle-with-proof` endpoint to ensure cryptographic verification before settling funds on Chain1 (Horizen)
+#### 1. **Key Generation (TEE Initialization)**
 
-## 🚀 Key Features
+When the relayer starts, it generates or loads an ECIES keypair:
 
-### 🛡️ Privacy Preservation
-- **Anonymous Recipients**: Users generate anonymous addresses that are stored securely in TEE
-- **Link Breaking**: Complete separation between user identity on Horizen and Base activity
-- **Zero-Knowledge Proofs**: Transaction validity proven without revealing sensitive information
-
-### ⚡ Cross-Chain Bridge Solving
-- **Intent-Based Architecture**: Users express intent to bridge assets across chains
-- **Competitive Auction**: Solvers compete to fulfill intents at the best rates
-- **Automated Execution**: End-to-end automation from intent creation to settlement
-
-### 🔍 zkVerify Proof System
-- **Light Client Integration**: Generates proofs of cross-chain transaction completion
-- **zkVerify Verification**: Leverages zkVerify's robust proof verification infrastructure
-- **Trust Minimization**: Reduces trust assumptions through cryptographic proofs
-- **Settle-with-Proof**: Dedicated endpoint for cryptographically verified settlements
-
-## 🏃‍♂️ How It Works
-
-### 1. Intent Creation with Anonymous Addresses
-Users create intents specifying:
-- Token A (on origin chain) and Token B (on destination chain)
-- Amount to bridge
-- Anonymous recipient addresses (generated client-side)
-- Distribution amounts across recipients
-
-### 2. TEE Secure Storage
-The relayer's TEE enclave securely stores the mapping:
+The public key is exposed via API endpoint:
 ```
-Intent ID → Anonymous Recipients (encrypted in TEE)
+GET /api/relayer/ecies-public-key
 ```
 
-### 3. Solver Competition & Execution
-- Solvers compete in auctions to fulfill intents
-- Winning solver deposits tokens and solves the intent on destination chain
-- Funds are distributed to anonymous addresses, breaking user identity links
+#### 2. **Client-Side Encryption (Solver)**
 
-### 4. zkVerify Proof & Settlement
-1. Light client generates proof of transaction completion on destination chain
-2. Relayer submits proof to zkVerify for verification
-3. Once proof is finalized, settlement is authorized on origin chain
-4. Solver receives escrowed funds after cryptographic verification
+Before storing recipient information, the solver encrypts the data:
 
-## 🛠️ Technical Implementation
 
-### Solver and Relayer (Rust/Go Implementation)
+#### 3. **TEE Storage and Decryption (Relayer)**
 
-The production solver and relayer are implemented in Rust/Go in the `tachyon-prod/` directory for optimal performance and security.
+The relayer receives encrypted data and decrypts it within the TEE:
 
-#### Key Components:
-- **Multi-Chain Support**: Operates across Horizen and Base networks
-- **Auction Participation**: Competitive bidding for profitable intents
-- **Cross-Chain Execution**: Handles token approvals, deposits, and distributions
-- **TEE Integration**: Secure enclave for anonymous address management
-- **Light Client**: Generates zero-knowledge proofs of cross-chain transactions
-- **zkVerify Interface**: Submits and verifies proofs through zkVerify
-- **Settlement with Proofs**: Cryptographic verification before settlement
+### Security Properties
 
-#### Proof Verification Flow
-1. **Proof Submission**: SP1 proof submitted to zkVerify API
-2. **Optimistic Verification**: Immediate validation of proof structure
-3. **Finalization Polling**: Relayer polls zkVerify until proof is finalized on-chain
-4. **Settlement Authorization**: Only finalized proofs authorize settlement transactions
+#### **End-to-End Encryption**
+- Recipient addresses are encrypted on the solver side
+- Only the relayer (within TEE) can decrypt them
+- No intermediary can read the recipient information
 
-See `tachyon-prod/README.md` for detailed setup and configuration instructions.
+#### **TEE Isolation**
+- ECIES private key never leaves the TEE enclave
+- Decrypted data exists only in TEE-protected memory
+- TEE attestation proves code integrity
 
-## 🔧 Setup & Configuration
+#### **Forward Secrecy**
+- ECIES uses ephemeral keys for each encryption
+- Past communications remain secure even if private key is compromised later
 
-### Prerequisites
-- Rust (for solver/relayer)
-- Go (for relayer components)
-- Node.js 18+ (for contract deployment)
-- Private keys for solver wallets on both chains
-- Access to zkVerify API
-- TEE-enabled hardware for relayer (optional)
+#### **Authentication**
+- ECIES includes HMAC for authenticated encryption
+- Prevents tampering with encrypted data
+- Ensures data integrity
 
-### Environment Variables
+### API Endpoints for ECIES
+
+#### Get Relayer's Public Key
 ```bash
-# Network Configuration
-HORIZEN_TESTNET_RPC_URL=https://...
-BASE_SEPOLIA_RPC_URL=https://...
+GET http://localhost:3000/api/relayer/ecies-public-key
 
-# Contract Addresses
-BRIDGE_CONTRACT_HORIZEN_LATEST=0x...
-BRIDGE_CONTRACT_BASE_LATEST=0x...
+Response:
+{
+  "publicKey": "04a1b2c3d4e5f6..."  # Uncompressed ECIES public key (hex)
+}
+```
 
+#### Store Encrypted Recipients
+```bash
+POST http://localhost:3000/store-recipients
+Content-Type: application/json
+
+{
+  "intentId": "123",
+  "encryptedData": "04a1b2c3...",  # ECIES encrypted recipient data
+  "chainId": 84532
+}
+```
+
+### Configuration
+
+In [.env](tachyon-prod/.env):
+
+```bash
+# ECIES Encryption Configuration
+# If not set, a new keypair will be generated on startup
+ECIES_PRIVATE_KEY=f35a3856e790c77d364291ff3b7841c675105a9efd6e3ada908b134c9ddd26ff
+```
+
+**Security Note**: Store this key securely! In production:
+- Use AWS Secrets Manager, HashiCorp Vault, or similar
+- Enable TEE attestation to verify enclave integrity
+- Rotate keys periodically
+
+## Solver and Relayer Architecture
+
+### Solver Service (Port 3001)
+
+The solver is responsible for:
+- **Event Monitoring**: Continuously polls multiple blockchains for `IntentCreated` events
+- **Profitability Analysis**: Calculates if solving an intent is profitable based on:
+  - Amount to be bridged
+  - Reward offered
+  - Current token balances
+  - Gas costs
+  - Configured profit margin
+- **Competitive Bidding**: Participates in on-chain auctions with smart bidding strategies
+- **Intent Execution**:
+  1. Deposits tokens on source chain to claim intent
+  2. Distributes tokens to anonymous addresses on destination chain
+  3. Coordinates with relayer for settlement
+- **Multi-Chain Support**: Handles intents across multiple chain pairs (Horizen ↔ Base ↔ Sepolia)
+
+#### Key Features
+- **Parallel Processing**: Uses Go goroutines for concurrent intent handling
+- **Smart Bidding**: Calculates optimal bids considering gas costs and profit margins
+- **Balance Management**: Maintains sufficient balances across all chains
+- **Error Recovery**: Automatic retry logic for failed transactions
+
+#### Configuration
+```bash
 # Solver Configuration
-PRIVATE_KEY=0x...
-MIN_PROFIT_MARGIN=0.02
-MAX_BID_AMOUNT=1000
-BID_INCREMENT=1
-
-# TEE Relayer
-RELAYER_URL=https://tee-relayer.example.com
-ZKVERIFY_API_URL=https://zkverify.api.url
+MIN_PROFIT_MARGIN=0.02    # 2% minimum profit
+MAX_BID_AMOUNT=1000000000000000000000  # 1000 tokens max
+BID_INCREMENT=1000000000000000000      # 1 token increment
+BALANCE_BUFFER=0.1        # Keep 10% buffer in wallet
 ```
 
-### Installation & Running
+### Relayer Service (Port 3000)
 
-#### Deploy Smart Contracts
+The relayer provides privacy-preserving settlement services:
+- **TEE-Based Storage**: Stores anonymous recipient addresses in trusted execution environment
+- **ECIES Encryption**: Accepts only encrypted recipient data (see ECIES section above)
+- **Verification**: Verifies intent completion on destination chain
+- **Settlement**: Executes final settlement transactions on source chain
+- **Solver Registry**: Maintains registry of active solvers and their supported routes
+
+#### Key Features
+- **Privacy First**: All sensitive data encrypted and stored in TEE
+- **On-Chain Verification**: Direct blockchain state verification for fast settlement
+- **Multi-Chain Settlement**: Handles settlements across all configured chains
+- **Route Discovery**: Provides API for querying available routes and solvers
+
+#### API Endpoints
+
+**Health Check**
 ```bash
-# Install hardhat dependencies
-npm install
-
-# Deploy contracts
-npx hardhat run scripts/deploy.ts --network horizen_testnet
-npx hardhat run scripts/deploy.ts --network base_sepolia
-
-# Mint test tokens (optional)
-npx hardhat run scripts/mintTokens.ts --network horizen_testnet
+GET /health
 ```
 
-#### Run Solver & Relayer
-See [tachyon-prod/README.md](tachyon-prod/README.md) for detailed instructions on building and running the Rust/Go implementation.
+**ECIES Public Key** (for encryption)
+```bash
+GET /api/relayer/ecies-public-key
+```
 
-## 🔒 Security Considerations
+**Store Encrypted Recipients**
+```bash
+POST /store-recipients
+{
+  "intentId": "123",
+  "encryptedData": "04a1b2...",  # ECIES encrypted
+  "chainId": 84532
+}
+```
 
-### TEE Security
-- **Attestation**: Verify TEE attestation before trusting relayer
-- **Code Integrity**: Ensure relayer code hasn't been tampered with
-- **Secure Communication**: All communication with TEE over encrypted channels
+**Verify Intent**
+```bash
+POST /verify
+{
+  "intentId": "123",
+  "network": "base"
+}
+```
 
-### zkVerify Trust
-- **Proof Verification**: All cross-chain settlements require valid zkVerify proofs
-- **Light Client Security**: Light client implementation audited for correctness
-- **Verification Parameters**: Proper setup of zkVerify verification parameters
+**Settle Intent**
+```bash
+POST /settle
+{
+  "intentId": "123",
+  "network": "horizen",
+  "chain2IntentId": "123",
+  "solverAddress": "0x...",
+  "destinationChain": "base"
+}
+```
 
-### Privacy Guarantees
-- **Anonymous Addresses**: Generated client-side, never linked to user identity
-- **TEE Isolation**: Recipient data never leaves the secure enclave
-- **Zero-Knowledge**: Proofs reveal validity without exposing transaction details
+**Solver Registration**
+```bash
+POST /api/relayer/register
+{
+  "address": "0x...",
+  "routes": [...],
+  "supportedTokens": [...]
+}
+```
 
-## 🌐 Network Support
+**Route Discovery**
+```bash
+GET /api/relayer/routes?sourceChain=horizen&tokenA=0x...
+```
 
-### Horizen Testnet
-- **Chain ID**: 845320009
-- **Explorer**: https://horizen-explorer-testnet.appchain.base.org
-- **Privacy Features**: Enhanced with TEE-based anonymous address management
+## Deployment
 
-### Base Sepolia
-- **Chain ID**: 84532  
-- **Explorer**: https://sepolia-explorer.base.org
-- **Integration**: Seamless cross-chain settlement with zkVerify proofs
+### Current Deployment
 
-## 🤝 Contributing
+The system is deployed on the following testnet networks with bridge contracts and token support:
 
-We welcome contributions to enhance the privacy and security features:
+#### Network Configuration
 
-1. **TEE Improvements**: Enhance enclave security and performance
-2. **zkVerify Integration**: Optimize proof generation and verification
-3. **Privacy Features**: Additional anonymity and unlinkability improvements
-4. **Testing**: Comprehensive testing of privacy guarantees
+**Horizen Testnet**
+- Chain ID: `845320009`
+- Bridge Contract: `0xc862b8DC344FAf35CE0931c44A222a09cA2Bde33`
+- RPC: `https://horizen-rpc-testnet.appchain.base.org`
+- Explorer: [Horizen Testnet Explorer](https://horizen-explorer-testnet.appchain.base.org)
 
-## 📜 License
+**Base Sepolia**
+- Chain ID: `84532`
+- Bridge Contract: `0x1628Ae09a5f49b8A6B3Ec4Ca20c4C4a40017e13D`
+- RPC: `https://base-sepolia.g.alchemy.com/v2/...`
+- Explorer: [Base Sepolia Explorer](https://sepolia-explorer.base.org)
 
-MIT License - see [LICENSE](LICENSE) for details
+**Ethereum Sepolia**
+- Chain ID: `11155111`
+- Bridge Contract: `0xF3462eB059E0CdA7f20D451Bb2A53Aed937fEfca`
+- RPC: `https://eth-sepolia.g.alchemy.com/v2/...`
+- Explorer: [Sepolia Etherscan](https://sepolia.etherscan.io)
 
-## 🔗 Links
+#### Deployed Token Addresses
 
-- **zkVerify**: [zkverify.io](https://zkverify.io)
-- **Horizen**: [horizen.io](https://horizen.io)  
-- **Base**: [base.org](https://base.org)
-- **TEE Standards**: [Trusted Execution Environment specifications](https://trustedcomputinggroup.org/)
+**USDC (6 decimals)**
+- Horizen: `0xe3fA8D680BDa33dD128a7CCE2e291A39C264975c`
+- Base: `0x39b2DfD00D262B7A8d83468C244901c2c1252256`
+- Sepolia: `0x49463867BcA4Ba59B6602B7A32bDF5B469B644fa`
 
----
+**WETH (18 decimals)**
+- Horizen: `0x5D5567B92a1d9E9A53Db80DB9D0B570CB0f2C8d4`
+- Base: `0x04FAD9adBB9aE63b305aE3c91B027D095487A9e2`
+- Sepolia: `0x33E38B8BFfc065110902485932F5417e6cF911A0`
 
-*This bridge solver demonstrates how zkVerify and TEE technologies can be combined to create truly private cross-chain transactions, breaking user links while maintaining cryptographic security guarantees.*
+**ZEN (18 decimals)**
+- Horizen: `0x10FFc3D770344e1AcCF0bFf351a7D0f3b14153ec`
+- Base: `0xE991595dfd6A4b8f9C308cA3a9d469bF76FcA7Da`
+- Sepolia: `0xdB822B0dDBEE4b1dDd536bF1D654631D71765c7E`
+
+#### Service Endpoints
+- **Solver API**: Port `3001`
+- **Relayer API**: Port `3000`
+
+### Quick Start
+
+1. **Clone Repository**
+```bash
+git clone <repo-url>
+cd zk-tachyon-solver/tachyon-prod
+```
+
+2. **Configure Environment**
+```bash
+cp .env.example .env
+# Edit .env with your configuration
+```
+
+3. **Build Services**
+```bash
+make build
+```
+
+4. **Run Services**
+```bash
+# Terminal 1 - Relayer
+./bin/relayer
+
+# Terminal 2 - Solver
+./bin/solver
+```
+
+
+## Configuration
+
+### Chain Configuration
+
+The system uses a flexible chain configuration that supports multiple chains:
+
+```bash
+# Number of chains to configure (1-10)
+CHAIN_COUNT=3
+
+# Chain 1 Configuration
+CHAIN_1_ID=845320009
+CHAIN_1_NAME=horizen
+CHAIN_1_RPC=https://...
+CHAIN_1_BRIDGE=0x...
+CHAIN_1_EXPLORER=https://...
+
+# Add more chains as needed (CHAIN_2_*, CHAIN_3_*, etc.)
+```
+
+### ECIES Encryption
+
+```bash
+# ECIES private key for TEE relayer
+# Generate new key if not set (will be printed on first run)
+ECIES_PRIVATE_KEY=f35a3856e790c77d364291ff3b7841c675105a9efd6e3ada908b134c9ddd26ff
+```
+
+### Solver Parameters
+
+```bash
+# Minimum profit margin (0.02 = 2%)
+MIN_PROFIT_MARGIN=0.02
+
+# Maximum bid amount in wei
+MAX_BID_AMOUNT=1000000000000000000000
+
+# Bid increment in wei
+BID_INCREMENT=1000000000000000000
+
+# Balance buffer to keep in wallet (0.1 = 10%)
+BALANCE_BUFFER=0.1
+```
+
+## Testing
+
+### Unit Tests
+```bash
+cd tachyon-prod
+go test ./...
+```
+
+### Integration Tests
+```bash
+cd tachyon-prod
+make test-e2e
+```
+
+### Manual Testing
+
+1. **Check Health**
+```bash
+curl http://localhost:3000/health  # Relayer
+curl http://localhost:3001/health  # Solver
+```
+
+2. **Get ECIES Public Key**
+```bash
+curl http://localhost:3000/api/relayer/ecies-public-key
+```
+
+3. **Check Active Intents**
+```bash
+curl http://localhost:3001/active-intents
+```
+
+4. **Query Available Routes**
+```bash
+curl "http://localhost:3000/api/relayer/routes?sourceChain=horizen"
+```
+
+## Development
+
+### Project Structure
+```
+zk-tachyon-solver/
+├── tachyon-prod/              # Go implementation
+│   ├── cmd/
+│   │   ├── solver/           # Solver entry point
+│   │   └── relayer/          # Relayer entry point
+│   ├── pkg/
+│   │   ├── api/              # HTTP API handlers
+│   │   ├── blockchain/       # Blockchain clients
+│   │   ├── config/           # Configuration
+│   │   ├── relayer/          # Relayer logic
+│   │   ├── solver/           # Solver logic
+│   │   └── types/            # Type definitions
+│   ├── contracts/            # ABIs and Solidity
+│   ├── test/e2e/             # E2E tests
+│   └── scripts/              # Deployment scripts
+├── contracts/                # Smart contract source
+└── scripts/                  # Deployment scripts
+```
+
+### Building from Source
+```bash
+cd tachyon-prod
+
+# Build both services
+make build
+
+# Or build individually
+go build -o bin/solver ./cmd/solver
+go build -o bin/relayer ./cmd/relayer
+```
