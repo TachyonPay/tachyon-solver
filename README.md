@@ -1,6 +1,6 @@
 # ZK-Tachyon: Privacy-Preserving Cross-Chain Bridge Solver
 
-A privacy-first cross-chain bridge solver that uses **ECIES encryption within TEE** for anonymous address management and provides instant, secure bridging between multiple blockchain networks.
+A privacy-first cross-chain bridge solver that uses **stealth addresses + ECIES encryption within TEE** for complete anonymity and provides instant, secure bridging between multiple blockchain networks.
 
 ## Problem Statement
 
@@ -30,7 +30,7 @@ Existing cross-chain bridge solutions face critical limitations:
 ### Privacy Gaps Across All Solutions
 - **Problem**: Existing bridges link user identities across chains
 - **Impact**: Complete transaction history correlation, privacy violations
-- **Our Solution**: TEE-based anonymous address storage with ECIES encryption completely breaks user identity links
+- **Our Solution**: Stealth addresses + TEE-based anonymous address storage with ECIES encryption completely breaks user identity links
 
 ## Our Comprehensive Solution
 
@@ -51,8 +51,9 @@ Existing cross-chain bridge solutions face critical limitations:
 └──────────────────┘    └──────────────────┘    └─────────────────┘
          │                       │                       │
          │ 1. Create Intent      │                       │
-         │ + ECIES Encrypted     │                       │
-         │   Anonymous Addresses │                       │
+         │ + Derive Stealth Addr │                       │
+         │ + ECIES Encrypt       │                       │
+         │   Stealth Addresses   │                       │
          │──────────────────────▶│                       │
          │                       │ 2. Decrypt & Store   │
          │                       │    in TEE Enclave    │
@@ -66,7 +67,7 @@ Existing cross-chain bridge solutions face critical limitations:
          │                       │                       │
          │                       │◀──────────────────────│ 5. Solve Intent
          │                       │   Send TokenB to      │    on Chain B
-         │                       │   Anonymous Addresses │
+         │                       │   Stealth Addresses   │    (unlinkable)
          │                       │                       │
          │                       │ 6. Verify on-chain   │
          │                       │    transaction        │
@@ -75,16 +76,25 @@ Existing cross-chain bridge solutions face critical limitations:
          │    on Chain A         │                       │
          │◀──────────────────────│                       │
          │                       │                       │
+         │ 8. User re-derives    │                       │
+         │    stealth private    │                       │
+         │    keys to claim      │                       │
+         │                       │                       │
          └───────────────────────────────────────────────┘
                 Cross-Chain Bridge Complete
-               (User identity unlinkable)
+            (User identity completely unlinkable)
 ```
 
-## ECIES Encryption in TEE Relayer
+## Privacy Architecture: Stealth Addresses + ECIES + TEE
 
 ### Overview
 
-The relayer uses **Elliptic Curve Integrated Encryption Scheme (ECIES)** within a **Trusted Execution Environment (TEE)** to ensure complete privacy for users bridging assets.
+ZK-Tachyon implements a multi-layer privacy architecture combining:
+1. **Stealth Addresses**: Client-side cryptographic address derivation for unlinkability
+2. **ECIES Encryption**: Secure transmission of stealth addresses to the relayer
+3. **TEE Storage**: Isolated storage and decryption within Trusted Execution Environment
+
+The relayer uses **Elliptic Curve Integrated Encryption Scheme (ECIES)** within a **Trusted Execution Environment (TEE)** to receive and store encrypted stealth addresses, ensuring complete privacy for users bridging assets.
 
 ### How ECIES Works
 
@@ -172,6 +182,103 @@ ECIES_PRIVATE_KEY=f35a3856e790c77d364291ff3b7841c675105a9efd6e3ada908b134c9ddd26
 - Use AWS Secrets Manager, HashiCorp Vault, or similar
 - Enable TEE attestation to verify enclave integrity
 - Rotate keys periodically
+
+## Stealth Addresses for Privacy
+
+### Overview
+
+ZK-Tachyon implements **stealth addresses** on the client side to provide complete recipient privacy. Stealth addresses are cryptographically derived addresses that are unlinkable to the user's original address, ensuring cross-chain anonymity.
+
+### How Stealth Addresses Work
+
+#### 1. **Address Derivation (Client-Side)**
+
+When a user initiates a bridge transaction, the client-side application:
+- Derives stealth addresses from the user's signature
+- These addresses are deterministic but unlinkable to the source address
+- Multiple stealth addresses can be generated for distribution across recipients
+
+#### 2. **Key Properties**
+
+**Deterministic Generation**
+- Stealth addresses are derived using cryptographic functions
+- Can be regenerated by the user using their signature
+- No central registry or storage needed
+
+**Privacy Preservation**
+- Stealth addresses appear as random addresses on-chain
+- No observable link between source address and stealth addresses
+- Observers cannot correlate user activity across chains
+
+**Re-derivability**
+- Users can re-derive the private keys for stealth addresses
+- Enables claiming funds sent to stealth addresses
+- No need to store multiple private keys
+
+#### 3. **Integration with ECIES Encryption**
+
+The complete privacy flow combines stealth addresses with ECIES encryption:
+
+1. **Client-side**: User derives stealth addresses from signature
+2. **Client-side**: Stealth addresses are encrypted using relayer's ECIES public key
+3. **Transmission**: Only encrypted stealth addresses are sent to relayer
+4. **TEE Relayer**: Decrypts and stores stealth addresses in trusted environment
+5. **Solver**: Sends tokens to stealth addresses (unlinkable to user)
+6. **User**: Re-derives stealth private keys to access funds
+
+### Privacy Guarantees
+
+| Layer | Privacy Mechanism | Protection |
+|-------|------------------|------------|
+| **Address Generation** | Signature-derived stealth addresses | Source address unlinkability |
+| **Transmission** | ECIES encryption | Network-level privacy |
+| **Storage** | TEE-isolated decryption | Storage-level privacy |
+| **On-Chain** | Stealth address recipients | Blockchain-level privacy |
+| **Recovery** | Deterministic re-derivation | No key storage required |
+
+### Security Benefits
+
+**Complete Unlinkability**
+- On-chain transactions show only stealth addresses
+- Impossible to link bridged funds to original user address
+- Cross-chain activity correlation completely prevented
+
+**User-Controlled Privacy**
+- Users control stealth address generation
+- No trust required in relayer for address privacy
+- Deterministic recovery ensures no loss of access
+
+**Multi-Layer Protection**
+- Stealth addresses (cryptographic unlinkability)
+- ECIES encryption (transmission privacy)
+- TEE storage (server-side isolation)
+- Intent-based architecture (timing privacy)
+
+### Example Flow
+
+```
+User initiates bridge: 100 tokens from Chain A to Chain B
+
+1. Client derives stealth addresses:
+   - Stealth Address 1: 0xABC...123 (derived from user signature)
+   - Stealth Address 2: 0xDEF...456 (derived from user signature)
+   - Stealth Address 3: 0x789...XYZ (derived from user signature)
+
+2. Client encrypts stealth addresses using relayer's ECIES public key
+
+3. Encrypted data sent to relayer and stored in TEE
+
+4. Solver wins auction and distributes tokens:
+   - 30 tokens → 0xABC...123
+   - 35 tokens → 0xDEF...456
+   - 35 tokens → 0x789...XYZ
+
+5. On-chain observers see:
+   - Tokens sent to three random addresses
+   - No link to original user address
+
+6. User re-derives stealth private keys and claims funds
+```
 
 ## Solver and Relayer Architecture
 
