@@ -44,6 +44,12 @@ const config: HardhatUserConfig = {
       chainId: 421614,
       gasPrice: "auto",
     },
+    rari_testnet: {
+      url: process.env.RARI_TESTNET_RPC_URL || "https://rari-testnet.calderachain.xyz/http",
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+      chainId: 1918988905,
+      gasPrice: "auto",
+    },
     goerli: {
       url: process.env.GOERLI_RPC_URL || "",
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
@@ -62,7 +68,8 @@ const config: HardhatUserConfig = {
       goerli: process.env.ETHERSCAN_API_KEY || "",
       horizen_testnet: "not-needed", // Custom network, may not need API key
       base_sepolia: process.env.BASESCAN_API_KEY || "not-needed",
-      arbitrum_sepolia: process.env.ARBISCAN_API_KEY || "not-needed"
+      arbitrum_sepolia: process.env.ARBISCAN_API_KEY || "not-needed",
+      rari_testnet: "not-needed"
     },
     customChains: [
       {
@@ -87,6 +94,14 @@ const config: HardhatUserConfig = {
         urls: {
           apiURL: "https://api-sepolia.arbiscan.io/api",
           browserURL: "https://sepolia.arbiscan.io/"
+        }
+      },
+      {
+        network: "rari_testnet",
+        chainId: 1918988905,
+        urls: {
+          apiURL: "https://rari-testnet.calderachain.xyz/api",
+          browserURL: "https://rari-testnet.calderachain.xyz/"
         }
       }
     ]
