@@ -19,19 +19,27 @@ func NewRelayerAPI(r *relayer.Relayer) *RelayerAPI {
 	return &RelayerAPI{relayer: r}
 }
 
+// RegisterRoutes registers public routes
 func (api *RelayerAPI) RegisterRoutes(r *gin.Engine) {
+	// Public read endpoints
 	r.GET("/health", api.HealthCheck)
 	r.GET("/ecies-pubkey", api.GetECIESPublicKey)
-	r.POST("/store-recipients", api.StoreRecipients)
 	r.GET("/get-recipients/:intentId", api.GetRecipients)
 	r.GET("/intent-details/:intentId", api.GetIntentDetails)
-	r.GET("/list-stored-intents", api.ListStoredIntents)
-	r.DELETE("/delete-recipients/:intentId", api.DeleteRecipients)
 	r.POST("/verify", api.VerifyIntent)
-	r.POST("/settle", api.SettleIntent)
-	r.POST("/register-solver", api.RegisterSolver)
 	r.POST("/get-routes", api.GetRoutes)
 	r.GET("/get-routes", api.GetRoutesQuery)
+
+	// Endpoints that require solver/user interaction (not admin-protected)
+	r.POST("/store-recipients", api.StoreRecipients)
+	r.POST("/settle", api.SettleIntent)
+	r.POST("/register-solver", api.RegisterSolver)
+}
+
+// RegisterAdminRoutes registers admin-only routes (call with auth middleware group)
+func (api *RelayerAPI) RegisterAdminRoutes(r *gin.RouterGroup) {
+	r.GET("/list-stored-intents", api.ListStoredIntents)
+	r.DELETE("/delete-recipients/:intentId", api.DeleteRecipients)
 }
 
 func (api *RelayerAPI) HealthCheck(c *gin.Context) {

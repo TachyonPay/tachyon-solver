@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -16,15 +17,17 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/zk-tachyon/tachyon-prod/pkg/blockchain"
 	"github.com/zk-tachyon/tachyon-prod/pkg/config"
+	"github.com/zk-tachyon/tachyon-prod/pkg/storage"
 	"github.com/zk-tachyon/tachyon-prod/pkg/types"
 )
 
 type Relayer struct {
 	cfg              *config.Config
 	clients          map[string]*blockchain.Client
-	recipientStore   map[string]*types.RecipientInfo
-	intentDetailsStore map[string]*types.IntentDetails
-	registeredSolvers map[string]*types.SolverInfo
+	store            *storage.Store
+	recipientStore   map[string]*types.RecipientInfo   // In-memory cache
+	intentDetailsStore map[string]*types.IntentDetails // In-memory cache
+	registeredSolvers map[string]*types.SolverInfo     // In-memory cache
 	mu               sync.RWMutex
 	txMutexes        map[string]*sync.Mutex
 }
@@ -32,6 +35,13 @@ type Relayer struct {
 func NewRelayer(cfg *config.Config) (*Relayer, error) {
 	clients := make(map[string]*blockchain.Client)
 	txMutexes := make(map[string]*sync.Mutex)
+
+	// Initialize PebbleDB storage
+	dbPath := filepath.Join(cfg.DBPath, "relayer")
+	store, err := storage.NewStore(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize storage: %w", err)
+	}
 
 	for chainID, chainCfg := range cfg.Chains {
 		client, err := blockchain.NewClient(
@@ -42,6 +52,7 @@ func NewRelayer(cfg *config.Config) (*Relayer, error) {
 			chainCfg.Name,
 		)
 		if err != nil {
+			store.Close()
 			return nil, fmt.Errorf("failed to create client for chain %s (%s): %w", chainCfg.Name, chainID, err)
 		}
 		clients[chainID] = client
@@ -52,14 +63,41 @@ func NewRelayer(cfg *config.Config) (*Relayer, error) {
 		}).Info("Relayer blockchain client initialized")
 	}
 
-	return &Relayer{
+	relayer := &Relayer{
 		cfg:                cfg,
 		clients:            clients,
+		store:              store,
 		recipientStore:     make(map[string]*types.RecipientInfo),
 		intentDetailsStore: make(map[string]*types.IntentDetails),
 		registeredSolvers:  make(map[string]*types.SolverInfo),
 		txMutexes:          txMutexes,
-	}, nil
+	}
+
+	// Load persisted data from database
+	if err := relayer.loadPersistedData(); err != nil {
+		log.WithError(err).Warn("Failed to load persisted data, starting fresh")
+	}
+
+	log.WithField("dbPath", dbPath).Info("Relayer initialized with persistent storage")
+
+	return relayer, nil
+}
+
+// loadPersistedData loads previously saved data from the database
+func (r *Relayer) loadPersistedData() error {
+	// Load solvers
+	solvers, err := r.store.GetAllSolvers()
+	if err != nil {
+		return fmt.Errorf("failed to load solvers: %w", err)
+	}
+	r.mu.Lock()
+	for addr, info := range solvers {
+		r.registeredSolvers[addr] = info
+	}
+	r.mu.Unlock()
+
+	log.WithField("solverCount", len(solvers)).Info("Loaded persisted solvers from DB")
+	return nil
 }
 
 func (r *Relayer) GetECIESPublicKey() string {
@@ -136,7 +174,7 @@ func (r *Relayer) StoreRecipients(req *types.StoreRecipientsRequest) error {
 
 	storeKey := fmt.Sprintf("%d-%s", sourceChainID, req.IntentID)
 
-	r.recipientStore[storeKey] = &types.RecipientInfo{
+	recipientInfo := &types.RecipientInfo{
 		Success:     true,
 		IntentID:    req.IntentID,
 		Recipients:  recipients,
@@ -144,6 +182,13 @@ func (r *Relayer) StoreRecipients(req *types.StoreRecipientsRequest) error {
 		Timestamp:   time.Now().Unix(),
 		ChainID:     req.ChainID,
 		TotalAmount: totalAmount.String(),
+	}
+
+	r.recipientStore[storeKey] = recipientInfo
+
+	// Persist to database
+	if err := r.store.SaveRecipientInfo(sourceChainID, req.IntentID, recipientInfo); err != nil {
+		log.WithError(err).Warn("Failed to persist recipient info to database")
 	}
 
 	log.WithFields(log.Fields{
@@ -536,8 +581,7 @@ func (r *Relayer) SettleIntent(ctx context.Context, req *types.SettleRequest) (*
 	}).Info("Returning all transaction hashes to solver")
 
 	intentKey := fmt.Sprintf("%s-%s", req.Network, req.IntentID)
-	r.mu.Lock()
-	r.intentDetailsStore[intentKey] = &types.IntentDetails{
+	intentDetails := &types.IntentDetails{
 		IntentID:      req.IntentID,
 		SourceChainID: req.Network,
 		DestChainID:   destChainIDStr,
@@ -549,7 +593,15 @@ func (r *Relayer) SettleIntent(ctx context.Context, req *types.SettleRequest) (*
 		Timestamp:     time.Now(),
 		SettledAt:     time.Now(),
 	}
+
+	r.mu.Lock()
+	r.intentDetailsStore[intentKey] = intentDetails
 	r.mu.Unlock()
+
+	// Persist to database
+	if err := r.store.SaveIntentDetails(req.Network, req.IntentID, intentDetails); err != nil {
+		log.WithError(err).Warn("Failed to persist intent details to database")
+	}
 
 	log.WithField("intentKey", intentKey).Info("Stored intent details for frontend retrieval")
 
@@ -694,12 +746,19 @@ func (r *Relayer) RegisterSolver(req *types.RegisterSolverRequest) (*types.Regis
 	}
 
 	now := time.Now()
-	r.registeredSolvers[req.SolverAddress] = &types.SolverInfo{
+	solverInfo := &types.SolverInfo{
 		Address:      req.SolverAddress,
 		Routes:       req.Routes,
 		Balances:     balances,
 		RegisteredAt: now,
 		LastSeen:     now,
+	}
+
+	r.registeredSolvers[req.SolverAddress] = solverInfo
+
+	// Persist to database
+	if err := r.store.SaveSolverInfo(req.SolverAddress, solverInfo); err != nil {
+		log.WithError(err).Warn("Failed to persist solver info to database")
 	}
 
 	log.WithFields(log.Fields{
@@ -821,19 +880,43 @@ func (r *Relayer) GetChainInfo() map[string]string {
 func (r *Relayer) GetIntentDetails(sourceChainID, intentID string) (*types.IntentDetails, error) {
 	intentKey := fmt.Sprintf("%s-%s", sourceChainID, intentID)
 
+	// Check in-memory cache first
 	r.mu.RLock()
 	details, ok := r.intentDetailsStore[intentKey]
 	r.mu.RUnlock()
 
-	if !ok {
-		return nil, fmt.Errorf("intent details not found for intentID=%s on chain=%s", intentID, sourceChainID)
+	if ok {
+		return details, nil
 	}
 
-	return details, nil
+	// Try loading from database
+	details, err := r.store.GetIntentDetails(sourceChainID, intentID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load intent details from database: %w", err)
+	}
+
+	if details != nil {
+		// Cache in memory
+		r.mu.Lock()
+		r.intentDetailsStore[intentKey] = details
+		r.mu.Unlock()
+		return details, nil
+	}
+
+	return nil, fmt.Errorf("intent details not found for intentID=%s on chain=%s", intentID, sourceChainID)
 }
 
 func (r *Relayer) Close() {
 	for _, client := range r.clients {
 		client.Close()
+	}
+
+	// Close database
+	if r.store != nil {
+		if err := r.store.Close(); err != nil {
+			log.WithError(err).Error("Failed to close database")
+		} else {
+			log.Info("Database closed successfully")
+		}
 	}
 }

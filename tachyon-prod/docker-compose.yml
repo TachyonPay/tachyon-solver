@@ -1,0 +1,103 @@
+version: '3.8'
+
+services:
+  solver:
+    build:
+      context: .
+      dockerfile: Dockerfile.solver
+    container_name: tachyon-solver
+    restart: unless-stopped
+    ports:
+      - "${SOLVER_PORT:-8081}:8081"
+    environment:
+      - PRIVATE_KEY=${PRIVATE_KEY}
+      - RELAYER_URL=http://relayer:8080
+      - SOLVER_PORT=8081
+      - DB_PATH=/data/solver
+      - ADMIN_API_KEY=${ADMIN_API_KEY}
+      # Chain configuration
+      - CHAIN_COUNT=${CHAIN_COUNT:-4}
+      - CHAIN_1_ID=${CHAIN_1_ID}
+      - CHAIN_1_NAME=${CHAIN_1_NAME}
+      - CHAIN_1_RPC=${CHAIN_1_RPC}
+      - CHAIN_1_BRIDGE=${CHAIN_1_BRIDGE}
+      - CHAIN_2_ID=${CHAIN_2_ID}
+      - CHAIN_2_NAME=${CHAIN_2_NAME}
+      - CHAIN_2_RPC=${CHAIN_2_RPC}
+      - CHAIN_2_BRIDGE=${CHAIN_2_BRIDGE}
+      - CHAIN_3_ID=${CHAIN_3_ID}
+      - CHAIN_3_NAME=${CHAIN_3_NAME}
+      - CHAIN_3_RPC=${CHAIN_3_RPC}
+      - CHAIN_3_BRIDGE=${CHAIN_3_BRIDGE}
+      - CHAIN_4_ID=${CHAIN_4_ID}
+      - CHAIN_4_NAME=${CHAIN_4_NAME}
+      - CHAIN_4_RPC=${CHAIN_4_RPC}
+      - CHAIN_4_BRIDGE=${CHAIN_4_BRIDGE}
+      # Solver config
+      - MIN_PROFIT_MARGIN=${MIN_PROFIT_MARGIN:-0.01}
+      - MAX_BID_AMOUNT=${MAX_BID_AMOUNT:-1000000000000000000000}
+      - BID_INCREMENT=${BID_INCREMENT:-100000000000000000}
+      - BALANCE_BUFFER=${BALANCE_BUFFER:-0.1}
+    volumes:
+      - solver-data:/data
+    networks:
+      - tachyon-network
+    depends_on:
+      - relayer
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  relayer:
+    build:
+      context: .
+      dockerfile: Dockerfile.relayer
+    container_name: tachyon-relayer
+    restart: unless-stopped
+    ports:
+      - "${RELAYER_PORT:-8080}:8080"
+    environment:
+      - PRIVATE_KEY=${PRIVATE_KEY}
+      - ECIES_PRIVATE_KEY=${ECIES_PRIVATE_KEY}
+      - RELAYER_PORT=8080
+      - DB_PATH=/data/relayer
+      - ADMIN_API_KEY=${ADMIN_API_KEY}
+      # Chain configuration
+      - CHAIN_COUNT=${CHAIN_COUNT:-4}
+      - CHAIN_1_ID=${CHAIN_1_ID}
+      - CHAIN_1_NAME=${CHAIN_1_NAME}
+      - CHAIN_1_RPC=${CHAIN_1_RPC}
+      - CHAIN_1_BRIDGE=${CHAIN_1_BRIDGE}
+      - CHAIN_2_ID=${CHAIN_2_ID}
+      - CHAIN_2_NAME=${CHAIN_2_NAME}
+      - CHAIN_2_RPC=${CHAIN_2_RPC}
+      - CHAIN_2_BRIDGE=${CHAIN_2_BRIDGE}
+      - CHAIN_3_ID=${CHAIN_3_ID}
+      - CHAIN_3_NAME=${CHAIN_3_NAME}
+      - CHAIN_3_RPC=${CHAIN_3_RPC}
+      - CHAIN_3_BRIDGE=${CHAIN_3_BRIDGE}
+      - CHAIN_4_ID=${CHAIN_4_ID}
+      - CHAIN_4_NAME=${CHAIN_4_NAME}
+      - CHAIN_4_RPC=${CHAIN_4_RPC}
+      - CHAIN_4_BRIDGE=${CHAIN_4_BRIDGE}
+    volumes:
+      - relayer-data:/data
+    networks:
+      - tachyon-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+volumes:
+  solver-data:
+    driver: local
+  relayer-data:
+    driver: local
+
+networks:
+  tachyon-network:
+    driver: bridge

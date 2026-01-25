@@ -8,6 +8,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/zk-tachyon/tachyon-prod/pkg/blockchain"
 	"github.com/zk-tachyon/tachyon-prod/pkg/config"
+	"github.com/zk-tachyon/tachyon-prod/pkg/storage"
 	"github.com/zk-tachyon/tachyon-prod/pkg/types"
 )
 
@@ -32,7 +34,8 @@ type bidJob struct {
 type Solver struct {
 	cfg                *config.Config
 	clients            map[string]*blockchain.Client
-	activeIntents      map[string]*types.IntentStatus
+	store              *storage.Store
+	activeIntents      map[string]*types.IntentStatus // In-memory cache
 	lastProcessedBlock map[string]*big.Int
 	isRunning          bool
 	mu                 sync.RWMutex
@@ -50,6 +53,13 @@ func NewSolver(cfg *config.Config) (*Solver, error) {
 	txMutexes := make(map[string]*sync.Mutex)
 	bidWorkerPools := make(map[string]chan bidJob)
 
+	// Initialize PebbleDB storage
+	dbPath := filepath.Join(cfg.DBPath, "solver")
+	store, err := storage.NewStore(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize storage: %w", err)
+	}
+
 	// Initialize clients for each configured chain
 	for chainID, chainCfg := range cfg.Chains {
 		client, err := blockchain.NewClient(
@@ -60,6 +70,7 @@ func NewSolver(cfg *config.Config) (*Solver, error) {
 			chainCfg.Name,
 		)
 		if err != nil {
+			store.Close()
 			return nil, fmt.Errorf("failed to create client for chain %s (%s): %w", chainCfg.Name, chainID, err)
 		}
 		clients[chainID] = client
@@ -77,6 +88,7 @@ func NewSolver(cfg *config.Config) (*Solver, error) {
 	solver := &Solver{
 		cfg:                cfg,
 		clients:            clients,
+		store:              store,
 		activeIntents:      make(map[string]*types.IntentStatus),
 		lastProcessedBlock: make(map[string]*big.Int),
 		stopChan:           make(chan struct{}),
@@ -84,6 +96,11 @@ func NewSolver(cfg *config.Config) (*Solver, error) {
 		txMutexes:          txMutexes,
 		handlingWins:       make(map[string]bool),
 		chainPairMap:       chainPairMap,
+	}
+
+	// Load persisted state from DB
+	if err := solver.loadPersistedState(); err != nil {
+		log.WithError(err).Warn("Failed to load persisted state, starting fresh")
 	}
 
 	for networkKey, workerPool := range bidWorkerPools {
@@ -94,9 +111,59 @@ func NewSolver(cfg *config.Config) (*Solver, error) {
 	log.WithFields(log.Fields{
 		"chainCount": len(cfg.Chains),
 		"clients":    len(clients),
-	}).Info("Solver initialized with chain-based configuration")
+		"dbPath":     dbPath,
+	}).Info("Solver initialized with chain-based configuration and persistent storage")
 
 	return solver, nil
+}
+
+// loadPersistedState loads previously saved state from the database
+func (s *Solver) loadPersistedState() error {
+	// Load active intents
+	intents, err := s.store.GetAllIntentStatuses()
+	if err != nil {
+		return fmt.Errorf("failed to load intent statuses: %w", err)
+	}
+
+	s.mu.Lock()
+	for key, status := range intents {
+		s.activeIntents[key] = status
+	}
+	s.mu.Unlock()
+
+	// Load last processed blocks
+	for networkKey := range s.cfg.Chains {
+		blockNum, err := s.store.GetLastProcessedBlock(networkKey)
+		if err != nil {
+			log.WithError(err).WithField("network", networkKey).Warn("Failed to load last processed block")
+			continue
+		}
+		if blockNum != nil {
+			s.mu.Lock()
+			s.lastProcessedBlock[networkKey] = blockNum
+			s.mu.Unlock()
+			log.WithFields(log.Fields{
+				"network": networkKey,
+				"block":   blockNum.String(),
+			}).Info("Restored last processed block from DB")
+		}
+	}
+
+	// Load handling wins state
+	for key := range s.activeIntents {
+		parts := strings.SplitN(key, "-", 2)
+		if len(parts) == 2 {
+			handling, _ := s.store.IsHandlingWin(parts[0], parts[1])
+			if handling {
+				s.mu.Lock()
+				s.handlingWins[key] = true
+				s.mu.Unlock()
+			}
+		}
+	}
+
+	log.WithField("intentCount", len(intents)).Info("Loaded persisted state from DB")
+	return nil
 }
 
 // Start starts the solver event polling
@@ -407,6 +474,9 @@ func (s *Solver) processEvents(ctx context.Context, networkKey string) error {
 	s.lastProcessedBlock[networkKey] = new(big.Int).Set(currentBlock)
 	s.mu.Unlock()
 
+	// Persist to database
+	s.persistLastProcessedBlock(networkKey, currentBlock)
+
 	return nil
 }
 
@@ -425,13 +495,17 @@ func (s *Solver) handleNewIntent(ctx context.Context, networkKey string, intentI
 		}).Debug("Intent already being processed, skipping duplicate")
 		return
 	}
-	s.activeIntents[key] = &types.IntentStatus{
+	status := &types.IntentStatus{
 		IntentID:    intentID.String(),
 		Network:     networkKey,
 		Status:      "evaluating",
 		LastUpdated: time.Now(),
 	}
+	s.activeIntents[key] = status
 	s.mu.Unlock()
+
+	// Persist to database
+	s.persistIntentStatus(networkKey, intentID.String(), status)
 
 	intent, err := client.GetIntent(ctx, intentID)
 	if err != nil {
@@ -467,7 +541,11 @@ func (s *Solver) handleNewIntent(ctx context.Context, networkKey string, intentI
 	s.activeIntents[key].Status = "bidding"
 	s.activeIntents[key].OurBid = bidAmount.String()
 	s.activeIntents[key].LastUpdated = time.Now()
+	statusCopy := *s.activeIntents[key]
 	s.mu.Unlock()
+
+	// Persist to database
+	s.persistIntentStatus(networkKey, intentID.String(), &statusCopy)
 
 	go s.startBiddingLoop(ctx, networkKey, intentID, bidAmount)
 }
@@ -647,6 +725,8 @@ func (s *Solver) startBiddingLoop(ctx context.Context, networkKey string, intent
 					alreadyHandling := s.handlingWins[key]
 					if !alreadyHandling {
 						s.handlingWins[key] = true
+						// Persist to database
+						s.store.SetHandlingWin(networkKey, intentID.String(), true)
 					}
 					s.mu.Unlock()
 
@@ -854,6 +934,8 @@ func (s *Solver) handleAuctionWon(ctx context.Context, networkKey string, intent
 		status.Status = "deposited"
 		status.DepositTxHash = depositTxHash
 		status.LastUpdated = time.Now()
+		// Persist to database
+		s.persistIntentStatus(networkKey, intentID.String(), status)
 	}
 	s.mu.Unlock()
 
@@ -1180,6 +1262,8 @@ func (s *Solver) settleIntent(ctx context.Context, network string, chain1IntentI
 				status.Completed = true
 				status.Status = "completed"
 				status.LastUpdated = time.Now()
+				// Persist to database
+				s.persistIntentStatus(network, chain1IntentID.String(), status)
 			}
 			s.mu.Unlock()
 			return
@@ -1200,7 +1284,37 @@ func (s *Solver) settleIntent(ctx context.Context, network string, chain1IntentI
 }
 
 func (s *Solver) Close() {
+	// Close blockchain clients
 	for _, client := range s.clients {
 		client.Close()
+	}
+
+	// Close database
+	if s.store != nil {
+		if err := s.store.Close(); err != nil {
+			log.WithError(err).Error("Failed to close database")
+		} else {
+			log.Info("Database closed successfully")
+		}
+	}
+}
+
+// persistIntentStatus saves intent status to the database
+func (s *Solver) persistIntentStatus(networkKey, intentID string, status *types.IntentStatus) {
+	if err := s.store.SaveIntentStatus(networkKey, intentID, status); err != nil {
+		log.WithError(err).WithFields(log.Fields{
+			"network":  networkKey,
+			"intentID": intentID,
+		}).Error("Failed to persist intent status")
+	}
+}
+
+// persistLastProcessedBlock saves the last processed block to the database
+func (s *Solver) persistLastProcessedBlock(networkKey string, blockNum *big.Int) {
+	if err := s.store.SaveLastProcessedBlock(networkKey, blockNum); err != nil {
+		log.WithError(err).WithFields(log.Fields{
+			"network": networkKey,
+			"block":   blockNum.String(),
+		}).Error("Failed to persist last processed block")
 	}
 }

@@ -32,6 +32,9 @@ type Config struct {
 	// Service ports
 	SolverPort  string
 	RelayerPort string
+
+	// Database path for PebbleDB
+	DBPath string
 }
 
 // LoadConfig loads configuration from environment variables
@@ -119,6 +122,7 @@ func LoadConfig() (*Config, error) {
 	cfg.RelayerURL = getEnv("RELAYER_URL", "http://localhost:3000")
 	cfg.SolverPort = getEnv("SOLVER_PORT", "3001")
 	cfg.RelayerPort = getEnv("RELAYER_PORT", "3000")
+	cfg.DBPath = getEnv("DB_PATH", "./data")
 
 	// Load or generate ECIES keypair for recipient encryption
 	eciesPrivKeyHex := os.Getenv("ECIES_PRIVATE_KEY")

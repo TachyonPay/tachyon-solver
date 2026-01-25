@@ -73,12 +73,41 @@ tidy:
 	@echo "Tidying dependencies..."
 	$(GOMOD) tidy
 
-# Docker commands (optional)
+# Docker commands
+docker-build: docker-build-solver docker-build-relayer
+
 docker-build-solver:
+	@echo "Building solver Docker image..."
 	docker build -t tachyon-solver -f Dockerfile.solver .
 
 docker-build-relayer:
+	@echo "Building relayer Docker image..."
 	docker build -t tachyon-relayer -f Dockerfile.relayer .
+
+docker-up:
+	@echo "Starting services with Docker Compose..."
+	docker-compose up -d
+
+docker-down:
+	@echo "Stopping services..."
+	docker-compose down
+
+docker-logs:
+	docker-compose logs -f
+
+docker-logs-solver:
+	docker-compose logs -f solver
+
+docker-logs-relayer:
+	docker-compose logs -f relayer
+
+docker-restart:
+	docker-compose restart
+
+docker-clean:
+	@echo "Removing containers and volumes..."
+	docker-compose down -v
+	docker rmi tachyon-solver tachyon-relayer 2>/dev/null || true
 
 # E2E Testing
 test-e2e:
@@ -93,16 +122,34 @@ test-e2e-setup:
 # Help
 help:
 	@echo "Available targets:"
+	@echo ""
+	@echo "Build:"
 	@echo "  make build              - Build both services"
 	@echo "  make build-solver       - Build solver service"
 	@echo "  make build-relayer      - Build relayer service"
 	@echo "  make build-optimized    - Build with optimizations"
 	@echo "  make clean              - Clean build artifacts"
+	@echo ""
+	@echo "Run locally:"
 	@echo "  make run-solver         - Run solver service"
 	@echo "  make run-relayer        - Run relayer service"
-	@echo "  make test               - Run tests"
+	@echo ""
+	@echo "Docker:"
+	@echo "  make docker-build       - Build Docker images"
+	@echo "  make docker-up          - Start services with Docker Compose"
+	@echo "  make docker-down        - Stop Docker services"
+	@echo "  make docker-logs        - View logs from all services"
+	@echo "  make docker-logs-solver - View solver logs"
+	@echo "  make docker-logs-relayer- View relayer logs"
+	@echo "  make docker-restart     - Restart Docker services"
+	@echo "  make docker-clean       - Remove containers, volumes and images"
+	@echo ""
+	@echo "Testing:"
+	@echo "  make test               - Run unit tests"
 	@echo "  make test-e2e           - Run E2E tests"
 	@echo "  make test-e2e-setup     - Setup E2E test environment"
+	@echo ""
+	@echo "Development:"
 	@echo "  make fmt                - Format code"
 	@echo "  make lint               - Run linter"
 	@echo "  make deps               - Download dependencies"

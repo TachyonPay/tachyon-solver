@@ -5,11 +5,13 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 	"github.com/zk-tachyon/tachyon-prod/pkg/api"
 	"github.com/zk-tachyon/tachyon-prod/pkg/config"
+	"github.com/zk-tachyon/tachyon-prod/pkg/middleware"
 	"github.com/zk-tachyon/tachyon-prod/pkg/solver"
 )
 
@@ -46,10 +48,15 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
 
+	// Rate limiting middleware
+	rateLimiter := middleware.NewRateLimiter(100, time.Minute) // 100 requests per minute per IP
+	router.Use(middleware.RateLimitMiddleware(rateLimiter))
+
+	// CORS middleware
 	router.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
@@ -60,7 +67,22 @@ func main() {
 	})
 
 	solverAPI := api.NewSolverAPI(solverInstance)
+	
+	// Register public routes
 	solverAPI.RegisterRoutes(router)
+
+	// Register admin routes with API key auth
+	adminGroup := router.Group("/admin")
+	adminGroup.Use(middleware.APIKeyAuth())
+	solverAPI.RegisterAdminRoutes(adminGroup)
+
+	// Check if admin API key is configured
+	if os.Getenv("ADMIN_API_KEY") == "" {
+		log.Warn("⚠️  ADMIN_API_KEY not set - admin endpoints will be unavailable")
+		log.Warn("   Set ADMIN_API_KEY environment variable to enable admin access")
+	} else {
+		log.Info("Admin endpoints enabled at /admin/*")
+	}
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)

@@ -19,12 +19,18 @@ func NewSolverAPI(s *solver.Solver) *SolverAPI {
 	return &SolverAPI{solver: s}
 }
 
+// RegisterRoutes registers public routes
 func (api *SolverAPI) RegisterRoutes(r *gin.Engine) {
+	// Public read endpoints
 	r.GET("/health", api.HealthCheck)
 	r.GET("/status", api.GetStatus)
 	r.GET("/active-intents", api.GetActiveIntents)
 	r.GET("/intent-status/:intentId", api.GetIntentStatus)
 	r.GET("/intent-status/:intentId/:network", api.GetIntentStatusByNetwork)
+}
+
+// RegisterAdminRoutes registers admin-only routes (call with auth middleware group)
+func (api *SolverAPI) RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.POST("/start", api.StartSolver)
 	r.POST("/stop", api.StopSolver)
 }
