@@ -221,3 +221,94 @@ type GetIntentDetailsResponse struct {
 	Intent  *IntentDetails `json:"intent,omitempty"`
 	Error   string         `json:"error,omitempty"`
 }
+
+// StealthAddress represents a single stealth address generated for a recipient
+type StealthAddress struct {
+	Address        string `json:"address"`        // The stealth address (ETH address)
+	EphemeralPubKey string `json:"ephemeralPubKey"` // Ephemeral public key used to derive this address
+	ChainID        string `json:"chainId"`         // Chain where funds were sent
+	IntentID       string `json:"intentId"`        // Intent that triggered this stealth address
+	SafeDeployed   bool   `json:"safeDeployed"`    // Whether a Safe has been deployed at this address
+	SafeAddress    string `json:"safeAddress,omitempty"` // Deployed Safe address (if any)
+	CreatedAt      int64  `json:"createdAt"`
+}
+
+// RecipientAccount stores the TEE-generated keys and stealth addresses for a recipient
+type RecipientAccount struct {
+	RecipientAddress string           `json:"recipientAddress"` // The recipient's public EOA address
+	ViewPrivKey      string           `json:"viewPrivKey"`      // Hex-encoded viewing private key (TEE-held)
+	SpendPrivKey     string           `json:"spendPrivKey"`     // Hex-encoded spending private key (TEE-held)
+	SpendPubKey      string           `json:"spendPubKey"`      // Hex-encoded spending public key
+	ViewPubKey       string           `json:"viewPubKey"`       // Hex-encoded viewing public key
+	StealthAddresses []StealthAddress `json:"stealthAddresses"` // All stealth addresses for this recipient
+	Nonce            uint64           `json:"nonce"`            // Next nonce for stealth address generation
+	CreatedAt        int64            `json:"createdAt"`
+	UpdatedAt        int64            `json:"updatedAt"`
+}
+
+// RegisterRecipientRequest is sent by the recipient to register/fetch their keys
+type RegisterRecipientRequest struct {
+	RecipientAddress string `json:"recipientAddress" binding:"required"`
+	Signature        string `json:"signature" binding:"required"` // Signature of "REGISTER_STEALTH:<address>" to prove ownership
+}
+
+// RegisterRecipientResponse returns the recipient's public keys and stealth addresses
+type RegisterRecipientResponse struct {
+	Success          bool             `json:"success"`
+	SpendPubKey      string           `json:"spendPubKey"`
+	ViewPubKey       string           `json:"viewPubKey"`
+	StealthAddresses []StealthAddress `json:"stealthAddresses"`
+	Error            string           `json:"error,omitempty"`
+}
+
+// GetStealthAddressesResponse returns all stealth addresses for a recipient
+type GetStealthAddressesResponse struct {
+	Success          bool             `json:"success"`
+	StealthAddresses []StealthAddress `json:"stealthAddresses"`
+	Error            string           `json:"error,omitempty"`
+}
+
+// DeploySafeRequest is sent to deploy a Safe on a stealth address
+// Anyone can call this, but must provide a valid spend key signature
+type DeploySafeRequest struct {
+	StealthAddress string `json:"stealthAddress" binding:"required"` // The stealth address to deploy Safe on
+	Signature      string `json:"signature" binding:"required"`      // Signature from spend private key over "DEPLOY_SAFE:<stealthAddress>:<chainId>"
+	ChainID        string `json:"chainId" binding:"required"`        // Chain to deploy Safe on
+}
+
+// DeploySafeResponse returns the deployed Safe details
+type DeploySafeResponse struct {
+	Success     bool   `json:"success"`
+	SafeAddress string `json:"safeAddress,omitempty"`
+	TxHash      string `json:"txHash,omitempty"`
+	Error       string `json:"error,omitempty"`
+}
+
+// GenerateStealthRequest is used internally when a sender sends to a recipient
+// The TEE generates a new stealth address for the recipient
+type GenerateStealthRequest struct {
+	RecipientAddress string `json:"recipientAddress" binding:"required"`
+	ChainID          string `json:"chainId" binding:"required"`
+	IntentID         string `json:"intentId" binding:"required"`
+}
+
+// GenerateStealthResponse returns the stealth EOA and its predicted Safe address
+type GenerateStealthResponse struct {
+	StealthAddress string `json:"stealthAddress"`
+	SafeAddress    string `json:"safeAddress"`
+}
+
+// DeriveStealthKeyRequest is sent by the recipient to get the stealth private key
+type DeriveStealthKeyRequest struct {
+	RecipientAddress string `json:"recipientAddress" binding:"required"`
+	StealthAddress   string `json:"stealthAddress" binding:"required"`
+	Signature        string `json:"signature" binding:"required"` // Signs "DERIVE_STEALTH_KEY:<recipient>:<stealth>"
+}
+
+// DeriveStealthKeyResponse returns the derived stealth private key
+type DeriveStealthKeyResponse struct {
+	Success           bool   `json:"success"`
+	StealthAddress    string `json:"stealthAddress"`
+	StealthPrivateKey string `json:"stealthPrivateKey"` // Hex-encoded private key
+	Error             string `json:"error,omitempty"`
+}

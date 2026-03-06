@@ -244,6 +244,46 @@ func (s *Store) CleanupOldIntents(maxAge time.Duration) (int, error) {
 	return deleted, nil
 }
 
+// Recipient Account Storage (Stealth Addresses)
+
+// SaveRecipientAccount saves a recipient's stealth account data
+func (s *Store) SaveRecipientAccount(recipientAddress string, account *types.RecipientAccount) error {
+	key := PrefixRecipientAccount + recipientAddress
+	return s.PutJSON(key, account)
+}
+
+// GetRecipientAccount retrieves a recipient's stealth account data
+func (s *Store) GetRecipientAccount(recipientAddress string) (*types.RecipientAccount, error) {
+	key := PrefixRecipientAccount + recipientAddress
+	var account types.RecipientAccount
+	if err := s.GetJSON(key, &account); err != nil {
+		if err == pebble.ErrNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &account, nil
+}
+
+// SaveStealthToRecipientMapping maps a stealth address back to its recipient
+func (s *Store) SaveStealthToRecipientMapping(stealthAddress string, recipientAddress string) error {
+	key := PrefixStealthByAddr + stealthAddress
+	return s.Put(key, []byte(recipientAddress))
+}
+
+// GetRecipientByStealthAddress looks up which recipient owns a stealth address
+func (s *Store) GetRecipientByStealthAddress(stealthAddress string) (string, error) {
+	key := PrefixStealthByAddr + stealthAddress
+	data, err := s.Get(key)
+	if err != nil {
+		return "", err
+	}
+	if data == nil {
+		return "", nil
+	}
+	return string(data), nil
+}
+
 // Helper function
 func unmarshalJSON(data []byte, v interface{}) error {
 	return json.Unmarshal(data, v)

@@ -921,8 +921,14 @@ func (s *Solver) handleAuctionWon(ctx context.Context, networkKey string, intent
 
 	_, err = client.WaitForTransaction(ctx, tx)
 	if err != nil {
-		log.WithError(err).Error("Failed to confirm deposit transaction")
-		return
+		// Check if deposit already went through (e.g. from a retry that landed on-chain)
+		log.WithError(err).Warn("Deposit transaction reverted, checking if already deposited on-chain")
+		onChainIntent, checkErr := client.GetIntent(ctx, intentID)
+		if checkErr != nil || !onChainIntent.Deposited {
+			log.WithError(err).Error("Failed to confirm deposit transaction and intent not deposited on-chain")
+			return
+		}
+		log.WithField("intentID", intentID).Info("Intent already deposited on-chain despite tx revert, continuing")
 	}
 
 	depositTxHash := tx.Hash().Hex()
@@ -1141,6 +1147,11 @@ func (s *Solver) getRecipientsFromRelayer(intentID string, sourceChainID string)
 
 	if resp.StatusCode == http.StatusForbidden {
 		return nil, nil, fmt.Errorf("access denied: not the winning solver for this intent")
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, nil, fmt.Errorf("recipients not found: %s", string(body))
 	}
 
 	if resp.StatusCode != http.StatusOK {

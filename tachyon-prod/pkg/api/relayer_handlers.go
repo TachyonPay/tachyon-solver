@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -34,6 +35,13 @@ func (api *RelayerAPI) RegisterRoutes(r *gin.Engine) {
 	r.POST("/store-recipients", api.StoreRecipients)
 	r.POST("/settle", api.SettleIntent)
 	r.POST("/register-solver", api.RegisterSolver)
+
+	// Stealth address / recipient endpoints
+	r.POST("/recipient/register", api.RegisterRecipient)
+	r.GET("/recipient/addresses", api.GetStealthAddresses)
+	r.POST("/recipient/generate-stealth", api.GenerateStealthAddress)
+	r.POST("/recipient/derive-stealth-key", api.DeriveStealthKey)
+	r.POST("/recipient/deploy-safe", api.DeploySafe)
 }
 
 // RegisterAdminRoutes registers admin-only routes (call with auth middleware group)
@@ -108,9 +116,14 @@ func (api *RelayerAPI) GetRecipients(c *gin.Context) {
 
 	info, err := api.relayer.GetRecipientsForWinner(c.Request.Context(), intentID, sourceChainID, requesterAddr)
 	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{
+		errMsg := err.Error()
+		statusCode := http.StatusForbidden
+		if strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "not deposited") {
+			statusCode = http.StatusNotFound
+		}
+		c.JSON(statusCode, gin.H{
 			"success": false,
-			"error":   err.Error(),
+			"error":   errMsg,
 		})
 		return
 	}
@@ -258,6 +271,131 @@ func (api *RelayerAPI) GetRoutesQuery(c *gin.Context) {
 	}
 
 	response := api.relayer.GetRoutes(&filter)
+	c.JSON(http.StatusOK, response)
+}
+
+// RegisterRecipient handles recipient registration and key generation
+func (api *RelayerAPI) RegisterRecipient(c *gin.Context) {
+	var req types.RegisterRecipientRequest
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, types.RegisterRecipientResponse{
+			Success: false,
+			Error:   "Invalid request body: " + err.Error(),
+		})
+		return
+	}
+
+	response, err := api.relayer.RegisterRecipient(&req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, types.RegisterRecipientResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// GetStealthAddresses returns all stealth addresses for a recipient
+func (api *RelayerAPI) GetStealthAddresses(c *gin.Context) {
+	address := c.Query("address")
+	signature := c.Query("signature")
+
+	if address == "" || signature == "" {
+		c.JSON(http.StatusBadRequest, types.GetStealthAddressesResponse{
+			Success: false,
+			Error:   "address and signature query parameters required",
+		})
+		return
+	}
+
+	response, err := api.relayer.GetStealthAddresses(address, signature)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, types.GetStealthAddressesResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// GenerateStealthAddress generates a new stealth address for a recipient (internal/TEE use)
+func (api *RelayerAPI) GenerateStealthAddress(c *gin.Context) {
+	var req types.GenerateStealthRequest
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "Invalid request body: " + err.Error(),
+		})
+		return
+	}
+
+	result, err := api.relayer.GenerateStealthAddress(&req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":        true,
+		"stealthAddress": result.StealthAddress,
+		"safeAddress":    result.SafeAddress,
+	})
+}
+
+// DeriveStealthKey derives the stealth private key for a recipient
+func (api *RelayerAPI) DeriveStealthKey(c *gin.Context) {
+	var req types.DeriveStealthKeyRequest
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, types.DeriveStealthKeyResponse{
+			Success: false,
+			Error:   "Invalid request body: " + err.Error(),
+		})
+		return
+	}
+
+	result, err := api.relayer.DeriveStealthKey(&req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, types.DeriveStealthKeyResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// DeploySafe deploys a Safe on a stealth address
+func (api *RelayerAPI) DeploySafe(c *gin.Context) {
+	var req types.DeploySafeRequest
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, types.DeploySafeResponse{
+			Success: false,
+			Error:   "Invalid request body: " + err.Error(),
+		})
+		return
+	}
+
+	response, err := api.relayer.DeploySafe(c.Request.Context(), &req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, types.DeploySafeResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
 	c.JSON(http.StatusOK, response)
 }
 

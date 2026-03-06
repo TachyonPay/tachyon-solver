@@ -25,6 +25,8 @@ const (
 	PrefixLastBlock       = "last_block:"
 	PrefixActiveIntent    = "active_intent:"
 	PrefixHandlingWin     = "handling_win:"
+	PrefixRecipientAccount = "recipient_account:"
+	PrefixStealthByAddr    = "stealth_by_addr:"
 )
 
 // NewStore creates a new PebbleDB store at the given path

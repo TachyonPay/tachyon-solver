@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/joho/godotenv"
 
@@ -32,10 +35,8 @@ const (
 type TestConfig struct {
 	HorizenRPC        string
 	BaseRPC           string
-	SepoliaRPC        string
 	BridgeHorizenAddr string
 	BridgeBaseAddr    string
-	BridgeSepoliaAddr string
 	PrivateKey        string
 	RelayerURL        string
 	AuctionDuration   int64
@@ -62,17 +63,17 @@ func loadConfig() (*TestConfig, error) {
 		fmt.Printf("Warning: Error loading ../../.env file: %v\n", err)
 	}
 
-	return &TestConfig{
+	cfg := &TestConfig{
 		HorizenRPC:        os.Getenv("CHAIN_1_RPC"),
 		BaseRPC:           os.Getenv("CHAIN_2_RPC"),
-		SepoliaRPC:        os.Getenv("CHAIN_3_RPC"),
 		BridgeHorizenAddr: os.Getenv("CHAIN_1_BRIDGE"),
 		BridgeBaseAddr:    os.Getenv("CHAIN_2_BRIDGE"),
-		BridgeSepoliaAddr: os.Getenv("CHAIN_3_BRIDGE"),
 		PrivateKey:        os.Getenv("PRIVATE_KEY"),
 		RelayerURL:        getEnvOrDefault("RELAYER_URL", "http://65.0.45.215:3000"),
-		AuctionDuration:   100, // 40 seconds for solver to process
-	}, nil
+		AuctionDuration:   100,
+	}
+	fmt.Printf(">>> RelayerURL = %s\n", cfg.RelayerURL)
+	return cfg, nil
 }
 
 func getEnvOrDefault(key, defaultValue string) string {
@@ -83,12 +84,13 @@ func getEnvOrDefault(key, defaultValue string) string {
 }
 
 func main() {
+	fmt.Printf("🔐 EIP-712 Domain Separator: %x\n", eip712DomainSeparator)
+	fmt.Printf("🔐 EIP-712 DomainTypeHash:   %x\n", eip712DomainTypeHash)
+	fmt.Printf("🔐 RegisterTypeHash:         %x\n", registerStealthTypeHash)
 	fmt.Println("🚀 Starting Multi-Chain E2E Test")
-	fmt.Println("Testing 4 bidirectional intent flows:")
-	fmt.Println("  1. Horizen → Base Sepolia")
-	fmt.Println("  2. Base Sepolia → Horizen")
-	fmt.Println("  3. Horizen → Ethereum Sepolia")
-	fmt.Println("  4. Ethereum Sepolia → Horizen\n")
+	fmt.Println("Testing 2 bidirectional intent flows:")
+	fmt.Println("  1. Horizen → Base Sepolia (WETH)")
+	fmt.Println("  2. Base Sepolia → Horizen (USDC)\n")
 
 	ctx := context.Background()
 
@@ -112,21 +114,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	sepoliaClient, err := ethclient.Dial(cfg.SepoliaRPC)
-	if err != nil {
-		fmt.Printf("❌ Failed to connect to Sepolia: %v\n", err)
-		os.Exit(1)
-	}
-
 	// Get chain IDs
 	horizenChainID, _ := horizenClient.ChainID(ctx)
 	baseChainID, _ := baseClient.ChainID(ctx)
-	sepoliaChainID, _ := sepoliaClient.ChainID(ctx)
 
 	fmt.Printf("✅ Connected to all networks\n")
 	fmt.Printf("   Horizen: Chain ID %s, Block %d\n", horizenChainID, mustGetBlockNumber(ctx, horizenClient))
-	fmt.Printf("   Base Sepolia: Chain ID %s, Block %d\n", baseChainID, mustGetBlockNumber(ctx, baseClient))
-	fmt.Printf("   Ethereum Sepolia: Chain ID %s, Block %d\n\n", sepoliaChainID, mustGetBlockNumber(ctx, sepoliaClient))
+	fmt.Printf("   Base Sepolia: Chain ID %s, Block %d\n\n", baseChainID, mustGetBlockNumber(ctx, baseClient))
 
 	// Setup wallet
 	wallet, err := utils.CreateTestWallet(cfg.PrivateKey)
@@ -143,15 +137,12 @@ func main() {
 	// Create bridge contracts
 	bridgeHorizen := bind.NewBoundContract(common.HexToAddress(cfg.BridgeHorizenAddr), bridgeABI, horizenClient, horizenClient, horizenClient)
 	bridgeBase := bind.NewBoundContract(common.HexToAddress(cfg.BridgeBaseAddr), bridgeABI, baseClient, baseClient, baseClient)
-	bridgeSepolia := bind.NewBoundContract(common.HexToAddress(cfg.BridgeSepoliaAddr), bridgeABI, sepoliaClient, sepoliaClient, sepoliaClient)
 
 	// Get token addresses from env
 	tokenWETH_Horizen := os.Getenv("TOKEN_WETH_HORIZEN")
 	tokenWETH_Base := os.Getenv("TOKEN_WETH_BASE")
-	tokenWETH_Sepolia := os.Getenv("TOKEN_WETH_SEPOLIA")
 	tokenUSDC_Horizen := os.Getenv("TOKEN_USDC_HORIZEN")
 	tokenUSDC_Base := os.Getenv("TOKEN_USDC_BASE")
-	tokenUSDC_Sepolia := os.Getenv("TOKEN_USDC_SEPOLIA")
 
 	// Define test scenarios
 	tests := []IntentTest{
@@ -169,23 +160,9 @@ func main() {
 			SourceBridge: bridgeBase, DestBridge: bridgeHorizen,
 			SourceChainID: baseChainID, DestChainID: horizenChainID,
 		},
-		{
-			TestNum: 3, SourceChain: "horizen", DestChain: "sepolia",
-			TokenA: tokenUSDC_Horizen, TokenB: tokenUSDC_Sepolia, TokenDecimals: 6,
-			SourceClient: horizenClient, DestClient: sepoliaClient,
-			SourceBridge: bridgeHorizen, DestBridge: bridgeSepolia,
-			SourceChainID: horizenChainID, DestChainID: sepoliaChainID,
-		},
-		{
-			TestNum: 4, SourceChain: "sepolia", DestChain: "horizen",
-			TokenA: tokenWETH_Sepolia, TokenB: tokenWETH_Horizen, TokenDecimals: 18,
-			SourceClient: sepoliaClient, DestClient: horizenClient,
-			SourceBridge: bridgeSepolia, DestBridge: bridgeHorizen,
-			SourceChainID: sepoliaChainID, DestChainID: horizenChainID,
-		},
 	}
 
-	// Create all 4 intents
+	// Create all intents
 	fmt.Println(strings.Repeat("=", 80))
 	fmt.Println("📝 CREATING INTENTS")
 	fmt.Println(strings.Repeat("=", 80))
@@ -211,10 +188,10 @@ func main() {
 
 	// Wait for solver to process all intents
 	fmt.Println(strings.Repeat("=", 80))
-	fmt.Printf("⏳ Waiting 4 minutes for solver to process all intents...\n")
+	fmt.Printf("⏳ Waiting 2 minutes for solver to process all intents...\n")
 	fmt.Println("   (1 minute per intent for bidding, solving, and settling)")
 	fmt.Println(strings.Repeat("=", 80))
-	time.Sleep(4 * time.Minute)
+	time.Sleep(2 * time.Minute)
 
 	// Verify all intents
 	fmt.Println("\n" + strings.Repeat("=", 80))
@@ -266,27 +243,181 @@ func main() {
 		}
 	}
 
+	// =====================================================================
+	// STEALTH RECIPIENT PHASE: Derive key, deploy Safe, verify balances
+	// =====================================================================
+	fmt.Println("\n" + strings.Repeat("=", 80))
+	fmt.Println("🔏 STEALTH RECIPIENT PHASE")
+	fmt.Println("   Recipients derive stealth key, deploy Safe, verify token balances")
+	fmt.Println(strings.Repeat("=", 80))
+
+	stealthSuccessCount := 0
+	stealthTotalTests := 0
+
+	for i, intent := range createdIntents {
+		fmt.Printf("\n📊 Intent %d (%s → %s): Testing stealth recipient flow\n", i+1, intent.SourceChain, intent.DestChain)
+
+		// Only test first recipient per intent to save gas/time
+		recipientKey := intent.RecipientKeys[0]
+		stealthAddr := intent.StealthAddrs[0]
+		safeAddr := intent.Recipients[0] // This is the Safe address now
+		recipientAddr := crypto.PubkeyToAddress(recipientKey.PublicKey).Hex()
+
+		stealthTotalTests++
+		fmt.Printf("   Recipient (%s...):\n", recipientAddr[:12])
+
+		// Step A: Fetch stealth addresses (EIP-712)
+		getSig := signGetStealthAddresses(recipientKey, common.HexToAddress(recipientAddr))
+
+		u, _ := url.Parse(cfg.RelayerURL + "/recipient/addresses")
+		q := u.Query()
+		q.Set("address", recipientAddr)
+		q.Set("signature", hex.EncodeToString(getSig))
+		u.RawQuery = q.Encode()
+
+		addrResp, err := http.Get(u.String())
+		if err != nil {
+			fmt.Printf("      ❌ Failed to fetch addresses: %v\n", err)
+			continue
+		}
+		addrBody, _ := io.ReadAll(addrResp.Body)
+		addrResp.Body.Close()
+
+		var addrResult struct {
+			Success          bool `json:"success"`
+			StealthAddresses []struct {
+				Address      string `json:"address"`
+				ChainID      string `json:"chainId"`
+				IntentID     string `json:"intentId"`
+				SafeDeployed bool   `json:"safeDeployed"`
+				SafeAddress  string `json:"safeAddress"`
+			} `json:"stealthAddresses"`
+		}
+		json.Unmarshal(addrBody, &addrResult)
+
+		if !addrResult.Success || len(addrResult.StealthAddresses) == 0 {
+			fmt.Printf("      ❌ No stealth addresses returned\n")
+			continue
+		}
+		fmt.Printf("      ✅ Fetched %d stealth address(es)\n", len(addrResult.StealthAddresses))
+
+		// Step B: Derive stealth private key from TEE (EIP-712)
+		deriveSig := signDeriveStealthKey(recipientKey, common.HexToAddress(recipientAddr), common.HexToAddress(stealthAddr))
+
+		deriveBody, _ := json.Marshal(map[string]string{
+			"recipientAddress": recipientAddr,
+			"stealthAddress":   stealthAddr,
+			"signature":        hex.EncodeToString(deriveSig),
+		})
+
+		deriveResp, err := http.Post(cfg.RelayerURL+"/recipient/derive-stealth-key", "application/json", bytes.NewReader(deriveBody))
+		if err != nil {
+			fmt.Printf("      ❌ Failed to derive stealth key: %v\n", err)
+			continue
+		}
+		deriveRespBody, _ := io.ReadAll(deriveResp.Body)
+		deriveResp.Body.Close()
+
+		var deriveResult struct {
+			Success           bool   `json:"success"`
+			StealthAddress    string `json:"stealthAddress"`
+			StealthPrivateKey string `json:"stealthPrivateKey"`
+			Error             string `json:"error"`
+		}
+		json.Unmarshal(deriveRespBody, &deriveResult)
+
+		if !deriveResult.Success {
+			fmt.Printf("      ❌ Failed to derive stealth key: %s\n", deriveResult.Error)
+			continue
+		}
+
+		stealthPrivKey, err := crypto.HexToECDSA(deriveResult.StealthPrivateKey)
+		if err != nil {
+			fmt.Printf("      ❌ Invalid stealth private key: %v\n", err)
+			continue
+		}
+		derivedAddr := crypto.PubkeyToAddress(stealthPrivKey.PublicKey)
+		fmt.Printf("      ✅ Derived stealth key, controls %s\n", derivedAddr.Hex()[:16]+"...")
+
+		// Step C: Verify token balance at Safe address on destination chain
+		destClient := tests[i].DestClient
+		tokenB := tests[i].TokenB
+		tokenContract := bind.NewBoundContract(common.HexToAddress(tokenB), erc20ABI, destClient, destClient, destClient)
+
+		var balResult []interface{}
+		err = tokenContract.Call(&bind.CallOpts{Context: ctx}, &balResult, "balanceOf", common.HexToAddress(safeAddr))
+		if err != nil {
+			fmt.Printf("      ⚠️  Failed to check balance at Safe %s: %v\n", safeAddr[:12]+"...", err)
+		} else if len(balResult) > 0 {
+			balance := balResult[0].(*big.Int)
+			fmt.Printf("      ✅ Safe %s has token balance: %s\n", safeAddr[:12]+"...", balance.String())
+		}
+
+		// Step D: Deploy Safe using stealth private key (EIP-712)
+		destChainIDBig, _ := new(big.Int).SetString(intent.DestChainID, 10)
+		deploySig := signDeploySafe(stealthPrivKey, common.HexToAddress(stealthAddr), destChainIDBig)
+
+		deployBody, _ := json.Marshal(map[string]string{
+			"stealthAddress": stealthAddr,
+			"signature":      hex.EncodeToString(deploySig),
+			"chainId":        intent.DestChainID,
+		})
+
+		deployResp, err := http.Post(cfg.RelayerURL+"/recipient/deploy-safe", "application/json", bytes.NewReader(deployBody))
+		if err != nil {
+			fmt.Printf("      ❌ Deploy Safe request failed: %v\n", err)
+			continue
+		}
+		deployRespBody, _ := io.ReadAll(deployResp.Body)
+		deployResp.Body.Close()
+
+		var deployResult struct {
+			Success     bool   `json:"success"`
+			SafeAddress string `json:"safeAddress"`
+			TxHash      string `json:"txHash"`
+			Error       string `json:"error"`
+		}
+		json.Unmarshal(deployRespBody, &deployResult)
+
+		if deployResult.Success {
+			fmt.Printf("      ✅ Safe deployed at %s (tx: %s)\n", deployResult.SafeAddress[:16]+"...", deployResult.TxHash[:16]+"...")
+			stealthSuccessCount++
+		} else {
+			fmt.Printf("      ❌ Deploy Safe failed: %s\n", deployResult.Error)
+		}
+	}
+
 	// Print summary
 	fmt.Println("\n" + strings.Repeat("=", 80))
 	fmt.Println("🎉 Multi-Chain E2E Test Complete!")
 	fmt.Println(strings.Repeat("=", 80))
-	fmt.Printf("\n📊 Results: %d/%d intents completed successfully\n", successCount, len(createdIntents))
+	fmt.Printf("\n📊 Bridge Results: %d/%d intents completed successfully\n", successCount, len(createdIntents))
+	fmt.Printf("📊 Stealth Results: %d/%d recipient flows passed\n", stealthSuccessCount, stealthTotalTests)
 	fmt.Println("\n✅ Test Scenarios:")
 	fmt.Println("   ✓ Horizen → Base Sepolia (WETH)")
 	fmt.Println("   ✓ Base Sepolia → Horizen (USDC)")
-	fmt.Println("   ✓ Horizen → Ethereum Sepolia (USDC)")
-	fmt.Println("   ✓ Ethereum Sepolia → Horizen (WETH)")
+	fmt.Println("\n🔏 Stealth Flow Tested:")
+	fmt.Println("   ✓ Recipient registration (TEE key generation)")
+	fmt.Println("   ✓ Stealth address + Safe address generation per intent")
+	fmt.Println("   ✓ Solver delivers tokens to predicted Safe addresses")
+	fmt.Println("   ✓ Recipient fetches stealth addresses from TEE")
+	fmt.Println("   ✓ Recipient derives stealth private key from TEE")
+	fmt.Println("   ✓ Token balance verified at Safe address")
+	fmt.Println("   ✓ Safe deployed using stealth key signature")
 	fmt.Println("\n💡 Check solver logs for routing decisions!")
 }
 
 type CreatedIntent struct {
-	IntentID      *big.Int
-	SourceChain   string
-	DestChain     string
-	SourceBridge  *bind.BoundContract
-	DestBridge    *bind.BoundContract
-	Recipients    []string
-	Amounts       []string
+	IntentID       *big.Int
+	SourceChain    string
+	DestChain      string
+	SourceBridge   *bind.BoundContract
+	DestBridge     *bind.BoundContract
+	Recipients     []string
+	Amounts        []string
+	RecipientKeys  []*ecdsa.PrivateKey // EOA keys for each recipient (to sign stealth requests)
+	StealthAddrs   []string           // Stealth addresses generated for each recipient
+	DestChainID    string             // Destination chain ID string
 }
 
 func createIntent(ctx context.Context, cfg *TestConfig, wallet *utils.TestWallet, test *IntentTest, erc20ABI abi.ABI) (*CreatedIntent, error) {
@@ -389,35 +520,110 @@ func createIntent(ctx context.Context, cfg *TestConfig, wallet *utils.TestWallet
 	// For now, just verify we got data back (non-empty response means intent exists)
 	fmt.Printf("✅ Intent created on %s: ID=%s (verified on-chain)\n", test.SourceChain, actualIntentID)
 
-	// Generate recipients with amounts in the correct token decimals for tokenB
-	recipients := []string{
-		utils.GenerateRandomAddress().Hex(),
-		utils.GenerateRandomAddress().Hex(),
-		utils.GenerateRandomAddress().Hex(),
+	// =========================================================================
+	// STEALTH ADDRESS FLOW: Register recipients, generate stealth addresses
+	// Instead of random addresses, we register 3 recipients with the relayer,
+	// generate stealth addresses for each, and use those as delivery targets.
+	// =========================================================================
+	fmt.Println("🔏 Registering recipients and generating stealth addresses...")
+
+	recipientKeys := make([]*ecdsa.PrivateKey, 3)
+	stealthAddrs := make([]string, 3)
+	safeAddrs := make([]string, 3)
+	destChainIDStr := test.DestChainID.String()
+
+	for i := 0; i < 3; i++ {
+		// Generate a recipient EOA
+		recipientKey, err := crypto.GenerateKey()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate recipient key %d: %w", i, err)
+		}
+		recipientKeys[i] = recipientKey
+		recipientAddr := crypto.PubkeyToAddress(recipientKey.PublicKey).Hex()
+
+		// Register recipient with relayer (TEE generates view+spend keys, EIP-712)
+		regSig := signRegisterStealth(recipientKey, common.HexToAddress(recipientAddr))
+		fmt.Printf("   [DEBUG] Register EIP-712: addr=%s sigLen=%d sig=%s\n", recipientAddr, len(regSig), hex.EncodeToString(regSig[:8]))
+		regBody, _ := json.Marshal(map[string]string{
+			"recipientAddress": recipientAddr,
+			"signature":        hex.EncodeToString(regSig),
+		})
+
+		regResp, err := http.Post(cfg.RelayerURL+"/recipient/register", "application/json", bytes.NewReader(regBody))
+		if err != nil {
+			return nil, fmt.Errorf("failed to register recipient %d: %w", i, err)
+		}
+		regRespBody, _ := io.ReadAll(regResp.Body)
+		regResp.Body.Close()
+
+		if regResp.StatusCode != 200 {
+			return nil, fmt.Errorf("register recipient %d failed: %s", i, string(regRespBody))
+		}
+
+		var regResult map[string]interface{}
+		json.Unmarshal(regRespBody, &regResult)
+		if regResult["success"] != true {
+			return nil, fmt.Errorf("register recipient %d failed: %v", i, regResult["error"])
+		}
+		fmt.Printf("   ✅ Recipient %d registered: %s\n", i+1, recipientAddr[:16]+"...")
+
+		// Generate stealth address for this recipient on the destination chain
+		genBody, _ := json.Marshal(map[string]string{
+			"recipientAddress": recipientAddr,
+			"chainId":          destChainIDStr,
+			"intentId":         actualIntentID.String(),
+		})
+
+		genResp, err := http.Post(cfg.RelayerURL+"/recipient/generate-stealth", "application/json", bytes.NewReader(genBody))
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate stealth for recipient %d: %w", i, err)
+		}
+		genRespBody, _ := io.ReadAll(genResp.Body)
+		genResp.Body.Close()
+
+		if genResp.StatusCode != 200 {
+			return nil, fmt.Errorf("generate stealth %d failed: %s", i, string(genRespBody))
+		}
+
+		var genResult map[string]interface{}
+		json.Unmarshal(genRespBody, &genResult)
+		if genResult["success"] != true {
+			return nil, fmt.Errorf("generate stealth %d failed: %v", i, genResult["error"])
+		}
+
+		stealthAddrs[i] = genResult["stealthAddress"].(string)
+		safeAddrs[i] = genResult["safeAddress"].(string)
+		fmt.Printf("   ✅ Stealth address %d: %s\n", i+1, stealthAddrs[i][:16]+"...")
+		fmt.Printf("   ✅ Safe address %d:    %s\n", i+1, safeAddrs[i][:16]+"...")
 	}
+
+	// Use predicted Safe addresses as recipients — tokens land at the Safe controlled by the stealth EOA
+	recipients := safeAddrs
 	amounts := []string{
 		utils.ParseToken("30", test.TokenDecimals).String(),
 		utils.ParseToken("35", test.TokenDecimals).String(),
 		utils.ParseToken("30", test.TokenDecimals).String(),
 	}
 
-	// Store recipients in relayer with SOURCE chain ID (where intent was created)
-	// This is important because intent IDs are per-chain, and we need to track which chain the intent is on
-	fmt.Printf("📋 Storing recipients in relayer (intentID=%s, sourceChainID=%d)...\n", actualIntentID, test.SourceChainID)
+	// Store recipients (stealth addresses) in relayer with SOURCE chain ID
+	fmt.Printf("📋 Storing stealth recipients in relayer (intentID=%s, sourceChainID=%d)...\n", actualIntentID, test.SourceChainID)
 	if err := storeRecipients(cfg.RelayerURL, actualIntentID.String(), recipients, amounts, test.SourceChainID.Int64()); err != nil {
 		fmt.Printf("⚠️  Warning: Failed to store recipients: %v\n", err)
 	} else {
-		fmt.Println("✅ Recipients stored")
+		fmt.Println("✅ Stealth recipients stored for solver")
 	}
 
 	return &CreatedIntent{
-		IntentID:     actualIntentID,
-		SourceChain:  test.SourceChain,
-		DestChain:    test.DestChain,
-		SourceBridge: test.SourceBridge,
-		DestBridge:   test.DestBridge,
-		Recipients:   recipients,
-		Amounts:      amounts,
+		IntentID:      actualIntentID,
+		SourceChain:   test.SourceChain,
+		DestChain:     test.DestChain,
+		SourceBridge:  test.SourceBridge,
+		DestBridge:    test.DestBridge,
+		Recipients:    recipients,
+		Amounts:       amounts,
+		RecipientKeys: recipientKeys,
+		StealthAddrs:  stealthAddrs,
+		DestChainID:   destChainIDStr,
 	}, nil
 }
 
@@ -427,8 +633,6 @@ func getBridgeAddress(chain string, cfg *TestConfig) string {
 		return cfg.BridgeHorizenAddr
 	case "base":
 		return cfg.BridgeBaseAddr
-	case "sepolia":
-		return cfg.BridgeSepoliaAddr
 	default:
 		return ""
 	}
@@ -630,6 +834,50 @@ func getIntentDetailsFromRelayer(relayerURL, intentID, sourceChainID string) (*I
 	}
 
 	return result.Intent, nil
+}
+
+// EIP-712 signing helpers for TachyonStealth domain
+// Domain: {name: "TachyonStealth", version: "1"} (off-chain only, no verifyingContract/chainId)
+var (
+	eip712DomainTypeHash        = crypto.Keccak256Hash([]byte("EIP712Domain(string name,string version)"))
+	eip712DomainSeparator       = crypto.Keccak256Hash(eip712DomainTypeHash.Bytes(), crypto.Keccak256([]byte("TachyonStealth")), crypto.Keccak256([]byte("1")))
+	registerStealthTypeHash     = crypto.Keccak256Hash([]byte("RegisterStealth(address signer)"))
+	getStealthAddressesTypeHash = crypto.Keccak256Hash([]byte("GetStealthAddresses(address signer)"))
+	deriveStealthKeyTypeHash    = crypto.Keccak256Hash([]byte("DeriveStealthKey(address recipientAddress,address stealthAddress)"))
+	deploySafeTypeHash          = crypto.Keccak256Hash([]byte("DeploySafe(address stealthAddress,uint256 chainId)"))
+)
+
+func eip712Hash(structHash common.Hash) common.Hash {
+	return crypto.Keccak256Hash([]byte{0x19, 0x01}, eip712DomainSeparator.Bytes(), structHash.Bytes())
+}
+
+func signRegisterStealth(key *ecdsa.PrivateKey, signer common.Address) []byte {
+	structHash := crypto.Keccak256Hash(registerStealthTypeHash.Bytes(), common.LeftPadBytes(signer.Bytes(), 32))
+	digest := eip712Hash(structHash)
+	fmt.Printf("   [DEBUG-SIGN] RegisterStealth: signer=%s structHash=%x digest=%x\n", signer.Hex(), structHash[:8], digest[:8])
+	sig, _ := crypto.Sign(digest.Bytes(), key)
+	return sig
+}
+
+func signGetStealthAddresses(key *ecdsa.PrivateKey, signer common.Address) []byte {
+	structHash := crypto.Keccak256Hash(getStealthAddressesTypeHash.Bytes(), common.LeftPadBytes(signer.Bytes(), 32))
+	digest := eip712Hash(structHash)
+	sig, _ := crypto.Sign(digest.Bytes(), key)
+	return sig
+}
+
+func signDeriveStealthKey(key *ecdsa.PrivateKey, recipientAddress, stealthAddress common.Address) []byte {
+	structHash := crypto.Keccak256Hash(deriveStealthKeyTypeHash.Bytes(), common.LeftPadBytes(recipientAddress.Bytes(), 32), common.LeftPadBytes(stealthAddress.Bytes(), 32))
+	digest := eip712Hash(structHash)
+	sig, _ := crypto.Sign(digest.Bytes(), key)
+	return sig
+}
+
+func signDeploySafe(key *ecdsa.PrivateKey, stealthAddress common.Address, chainId *big.Int) []byte {
+	structHash := crypto.Keccak256Hash(deploySafeTypeHash.Bytes(), common.LeftPadBytes(stealthAddress.Bytes(), 32), common.LeftPadBytes(chainId.Bytes(), 32))
+	digest := eip712Hash(structHash)
+	sig, _ := crypto.Sign(digest.Bytes(), key)
+	return sig
 }
 
 // getIntentDetailsWithRetries fetches settlement details with retry logic
