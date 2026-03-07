@@ -834,18 +834,36 @@ func (s *Solver) handleAuctionWon(ctx context.Context, networkKey string, intent
 	tx, err := s.retryTransaction(ctx, networkKey, "deposit-and-pickup", func() (*ethtypes.Transaction, error) {
 		return client.DepositAndPickup(ctx, intentID)
 	})
+
+	var depositTxHash string
+
 	if err != nil {
-		log.WithError(err).Error("Failed to deposit and pickup after retries")
-		return
+		// Check if deposit already went through on-chain (e.g. from a prior retry)
+		intent, checkErr := client.GetIntent(ctx, intentID)
+		if checkErr == nil && intent.Deposited {
+			log.WithField("intentID", intentID).Warn("Deposit tx failed but intent already deposited on-chain, proceeding")
+			depositTxHash = "already-deposited"
+		} else {
+			log.WithError(err).Error("Failed to deposit and pickup after retries")
+			return
+		}
+	} else {
+		_, waitErr := client.WaitForTransaction(ctx, tx)
+		if waitErr != nil {
+			// Tx reverted — check if deposit already went through from an earlier attempt
+			intent, checkErr := client.GetIntent(ctx, intentID)
+			if checkErr == nil && intent.Deposited {
+				log.WithField("intentID", intentID).Warn("Deposit tx reverted but intent already deposited on-chain, proceeding")
+				depositTxHash = tx.Hash().Hex()
+			} else {
+				log.WithError(waitErr).Error("Failed to confirm deposit transaction")
+				return
+			}
+		} else {
+			depositTxHash = tx.Hash().Hex()
+		}
 	}
 
-	_, err = client.WaitForTransaction(ctx, tx)
-	if err != nil {
-		log.WithError(err).Error("Failed to confirm deposit transaction")
-		return
-	}
-
-	depositTxHash := tx.Hash().Hex()
 	key := fmt.Sprintf("%s-%s", networkKey, intentID.String())
 	s.mu.Lock()
 	if status, ok := s.activeIntents[key]; ok {
@@ -918,7 +936,7 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 	var recipients []string
 	var amounts []string
 	var recipientsErr error
-	maxRetries := 8
+	maxRetries := 12
 	for i := 0; i < maxRetries; i++ {
 		if i > 0 {
 			// Exponential backoff: 3s, 6s, 9s, 12s, 15s...

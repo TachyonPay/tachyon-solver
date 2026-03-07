@@ -193,6 +193,76 @@ type SolverInfo struct {
 	LastSeen     time.Time       `json:"lastSeen"`
 }
 
+// TWAPOrder represents a private TWAP order managed by the TEE
+type TWAPOrder struct {
+	ID              string    `json:"id"`
+	User            string    `json:"user"`            // User wallet address
+	AssetIn         string    `json:"assetIn"`         // Source token address (on source chain)
+	AssetOut        string    `json:"assetOut"`        // Destination token address (on dest chain)
+	ChainIn         string    `json:"chainIn"`         // Source chain name (e.g. "base")
+	ChainOut        string    `json:"chainOut"`        // Destination chain name (e.g. "robinhood")
+	SourceChainID   int64     `json:"sourceChainId"`   // Chain where funds are pulled from
+	DestChainID     int64     `json:"destChainId"`     // Chain where tokens are delivered
+	TotalAmountIn   string    `json:"totalAmountIn"`   // Total amount of assetIn to spend
+	AmountPerPeriod string    `json:"amountPerPeriod"` // Amount of assetIn per tranche
+	Period          int64     `json:"period"`          // Seconds between tranches
+	StartTime       int64     `json:"startTime"`       // Unix timestamp to start
+	EndTime         int64     `json:"endTime"`         // Unix timestamp to stop
+	PermitSignature string    `json:"permitSignature"` // Permit2 signature for pulling funds
+	Recipients      []string  `json:"recipients"`      // Destination recipients (encrypted at rest)
+	Amounts         []string  `json:"amounts"`         // Per-recipient amounts (proportional)
+	Status          string    `json:"status"`          // "active", "paused", "completed", "cancelled"
+	TranchesFilled  int       `json:"tranchesFilled"`  // Number of tranches executed
+	TotalTranches   int       `json:"totalTranches"`   // Total expected tranches
+	AmountSpent     string    `json:"amountSpent"`     // Total assetIn spent so far
+	CreatedAt       time.Time `json:"createdAt"`
+	LastExecutedAt  time.Time `json:"lastExecutedAt,omitempty"`
+}
+
+// CreateTWAPRequest is the request body for creating a TWAP order
+// The entire request is ECIES-encrypted by the client
+type CreateTWAPRequest struct {
+	EncryptedData string `json:"encryptedData" binding:"required"` // ECIES encrypted JSON of TWAPOrderParams
+}
+
+// TWAPOrderParams is the decrypted contents of a CreateTWAPRequest
+type TWAPOrderParams struct {
+	User            string   `json:"user"`
+	AssetIn         string   `json:"assetIn"`
+	AssetOut        string   `json:"assetOut"`
+	ChainIn         string   `json:"chainIn"`         // Source chain name
+	ChainOut        string   `json:"chainOut"`        // Destination chain name
+	SourceChainID   int64    `json:"sourceChainId"`
+	DestChainID     int64    `json:"destChainId"`
+	TotalAmountIn   string   `json:"totalAmountIn"`
+	AmountPerPeriod string   `json:"amountPerPeriod"`
+	Period          int64    `json:"period"`          // seconds
+	StartTime       int64    `json:"startTime"`
+	EndTime         int64    `json:"endTime"`
+	PermitSignature string   `json:"permitSignature"`
+	Recipients      []string `json:"recipients"`
+	Amounts         []string `json:"amounts"`         // proportional split per recipient
+}
+
+// TWAPOrderResponse is the response after creating a TWAP order
+type TWAPOrderResponse struct {
+	Success bool   `json:"success"`
+	OrderID string `json:"orderId,omitempty"`
+	Status  string `json:"status,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// TWAPStatusResponse is the response for querying TWAP order status
+type TWAPStatusResponse struct {
+	Success        bool   `json:"success"`
+	OrderID        string `json:"orderId"`
+	Status         string `json:"status"`
+	TranchesFilled int    `json:"tranchesFilled"`
+	TotalTranches  int    `json:"totalTranches"`
+	AmountSpent    string `json:"amountSpent"`
+	Error          string `json:"error,omitempty"`
+}
+
 // GetRoutesResponse is the response from get routes endpoint
 type GetRoutesResponse struct {
 	Success bool         `json:"success"`
