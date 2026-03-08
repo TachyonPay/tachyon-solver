@@ -161,8 +161,8 @@ func (e *Engine) CreateOrder(params *types.TWAPOrderParams) (*types.TWAPOrder, e
 		return nil, fmt.Errorf("invalid amountPerPeriod: %s", params.AmountPerPeriod)
 	}
 
-	if params.Period < 60 {
-		return nil, fmt.Errorf("period must be at least 60 seconds, got %d", params.Period)
+	if params.Period < 5 {
+		return nil, fmt.Errorf("period must be at least 5 seconds, got %d", params.Period)
 	}
 	if params.EndTime <= params.StartTime {
 		return nil, fmt.Errorf("endTime must be after startTime")
@@ -563,8 +563,8 @@ func (e *Engine) createIntent(ctx context.Context, client *ethclient.Client, cha
 	bridge := bind.NewBoundContract(bridgeAddr, parsedABI, client, client, client)
 
 	auctionDuration := order.Period / 2
-	if auctionDuration < 15 {
-		auctionDuration = 15
+	if auctionDuration < 20 {
+		auctionDuration = 20
 	}
 
 	tx, err := e.retryTransaction("createIntent", func() (*ethtypes.Transaction, error) {

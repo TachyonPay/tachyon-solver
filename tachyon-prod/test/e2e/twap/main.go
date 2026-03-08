@@ -33,7 +33,7 @@ const bridgeABI = `[{"inputs":[{"internalType":"uint256","name":"_intentId","typ
 func main() {
 	fmt.Println("=== TWAP E2E Test ===")
 	fmt.Println("Testing: Buy USDC on Robinhood with USDC on Base via private TWAP")
-	fmt.Println("  - 3 tranches, 90s apart")
+	fmt.Println("  - 3 tranches, 5s apart")
 	fmt.Println("  - Fresh random wallet funded from deployer")
 	fmt.Println("  - TWAP server on localhost:3002")
 	fmt.Println()
@@ -96,9 +96,7 @@ func main() {
 	parsedERC20, _ := abi.JSON(strings.NewReader(erc20ABI))
 	usdcBase := bind.NewBoundContract(common.HexToAddress(tokenUSDC_Base), parsedERC20, baseClient, baseClient, baseClient)
 
-	deployerAuth, err := utils.GetTransactOpts(ctx, baseClient, deployerWallet, baseChainID)
-	fatal(err, "deployer tx opts")
-	transferTx, err := usdcBase.Transact(deployerAuth, "transfer", freshAddr, totalUSDC)
+	transferTx, err := retryContractTx(ctx, baseClient, deployerWallet, baseChainID, usdcBase, "transfer", freshAddr, totalUSDC)
 	fatal(err, "transfer USDC to fresh wallet")
 	err = utils.WaitForTransaction(ctx, baseClient, transferTx.Hash(), 2*time.Minute)
 	fatal(err, "wait for USDC transfer")
@@ -168,7 +166,7 @@ func main() {
 		"destChainId":     robinhoodChainID.Int64(),
 		"totalAmountIn":   totalAmount.String(),
 		"amountPerPeriod": amountPerTranche.String(),
-		"period":          90,
+		"period":          5,
 		"startTime":       now + 5,
 		"endTime":         now + 600,
 		"permitSignature": "",
@@ -182,7 +180,7 @@ func main() {
 	encryptedHex := hex.EncodeToString(encrypted)
 
 	fmt.Printf("  Order encrypted (%d bytes)\n", len(encrypted))
-	fmt.Printf("  Params: 3 tranches x 100 USDC, 90s apart\n")
+	fmt.Printf("  Params: 3 tranches x 100 USDC, 5s apart\n")
 	fmt.Printf("  Route: Base (USDC) -> Robinhood (USDC)\n\n")
 
 	// ============================================================
@@ -279,8 +277,8 @@ func main() {
 	// ============================================================
 	// Step 7: Wait for solver to process all intents
 	// ============================================================
-	fmt.Println("Step 7: Waiting 120s for solver to process all created intents...")
-	time.Sleep(120 * time.Second)
+	fmt.Println("Step 7: Waiting 60s for solver to process all created intents...")
+	time.Sleep(60 * time.Second)
 
 	// ============================================================
 	// Step 8: Verify intents on-chain
@@ -339,26 +337,60 @@ func main() {
 
 // --- Helpers ---
 
-func sendETH(ctx context.Context, client *ethclient.Client, from *utils.TestWallet, to common.Address, amount *big.Int, chainID *big.Int) error {
-	nonce, err := client.PendingNonceAt(ctx, from.Address)
-	if err != nil {
-		return err
+func retryContractTx(ctx context.Context, client *ethclient.Client, wallet *utils.TestWallet, chainID *big.Int, contract *bind.BoundContract, method string, args ...interface{}) (*types.Transaction, error) {
+	for attempt := 0; attempt < 10; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+		}
+		auth, err := utils.GetTransactOpts(ctx, client, wallet, chainID)
+		if err != nil {
+			return nil, err
+		}
+		tx, err := contract.Transact(auth, method, args...)
+		if err != nil {
+			errStr := err.Error()
+			if strings.Contains(errStr, "nonce") || strings.Contains(errStr, "replacement transaction underpriced") {
+				fmt.Printf("  Nonce conflict on %s (attempt %d), retrying...\n", method, attempt+1)
+				continue
+			}
+			return nil, err
+		}
+		return tx, nil
 	}
-	gasPrice, err := client.SuggestGasPrice(ctx)
-	if err != nil {
-		return err
-	}
+	return nil, fmt.Errorf("%s failed after 10 retries", method)
+}
 
-	tx := types.NewTransaction(nonce, to, amount, uint64(21000), gasPrice, nil)
-	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(chainID), from.PrivateKey)
-	if err != nil {
-		return err
+func sendETH(ctx context.Context, client *ethclient.Client, from *utils.TestWallet, to common.Address, amount *big.Int, chainID *big.Int) error {
+	for attempt := 0; attempt < 10; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+		}
+		nonce, err := client.PendingNonceAt(ctx, from.Address)
+		if err != nil {
+			return err
+		}
+		gasPrice, err := client.SuggestGasPrice(ctx)
+		if err != nil {
+			return err
+		}
+
+		tx := types.NewTransaction(nonce, to, amount, uint64(21000), gasPrice, nil)
+		signedTx, err := types.SignTx(tx, types.NewEIP155Signer(chainID), from.PrivateKey)
+		if err != nil {
+			return err
+		}
+		err = client.SendTransaction(ctx, signedTx)
+		if err != nil {
+			errStr := err.Error()
+			if strings.Contains(errStr, "nonce") || strings.Contains(errStr, "replacement transaction underpriced") {
+				fmt.Printf("  Nonce conflict (attempt %d), retrying...\n", attempt+1)
+				continue
+			}
+			return err
+		}
+		return utils.WaitForTransaction(ctx, client, signedTx.Hash(), 2*time.Minute)
 	}
-	err = client.SendTransaction(ctx, signedTx)
-	if err != nil {
-		return err
-	}
-	return utils.WaitForTransaction(ctx, client, signedTx.Hash(), 2*time.Minute)
+	return fmt.Errorf("sendETH failed after 10 retries")
 }
 
 func getEnv(key, def string) string {

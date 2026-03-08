@@ -143,8 +143,14 @@ func (c *Client) GetTokenDecimals(ctx context.Context, tokenAddress common.Addre
 
 // GetIntent retrieves an intent from the contract
 func (c *Client) GetIntent(ctx context.Context, intentID *big.Int) (*pkgtypes.Intent, error) {
+	// Force read at the latest block to avoid stale RPC cache
+	latestBlock, err := c.ethClient.BlockNumber(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get latest block: %w", err)
+	}
+
 	var result []interface{}
-	err := c.contract.Call(&bind.CallOpts{Context: ctx}, &result, "getIntent", intentID)
+	err = c.contract.Call(&bind.CallOpts{Context: ctx, BlockNumber: new(big.Int).SetUint64(latestBlock)}, &result, "getIntent", intentID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get intent: %w", err)
 	}
