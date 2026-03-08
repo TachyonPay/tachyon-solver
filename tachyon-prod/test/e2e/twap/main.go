@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,14 +33,17 @@ const bridgeABI = `[{"inputs":[{"internalType":"uint256","name":"_intentId","typ
 
 func main() {
 	fmt.Println("=== TWAP E2E Test ===")
-	fmt.Println("Testing: Buy USDC on Robinhood with USDC on Base via private TWAP")
-	fmt.Println("  - 3 tranches, 5s apart")
+	fmt.Println("Testing: Buy AMZN on Robinhood with USDC on Base via private TWAP (1000:1)")
+	fmt.Println("  - 3 tranches, 5s apart, 100 USDC each → 0.1 AMZN each")
 	fmt.Println("  - Fresh random wallet funded from deployer")
 	fmt.Println("  - TWAP server on localhost:3002")
 	fmt.Println()
 
-	if err := godotenv.Load("../../../.env"); err != nil {
-		fmt.Printf("Warning: %v\n", err)
+	// Try multiple paths for .env depending on where binary is run from
+	if err := godotenv.Load("../../.env"); err != nil {
+		if err2 := godotenv.Load("../../../.env"); err2 != nil {
+			fmt.Printf("Warning: could not load .env: %v\n", err2)
+		}
 	}
 
 	ctx := context.Background()
@@ -54,7 +58,13 @@ func main() {
 	bridgeRobinhoodAddr := os.Getenv("CHAIN_2_BRIDGE")
 
 	tokenUSDC_Base := os.Getenv("TOKEN_USDC_BASE")
-	tokenUSDC_Robinhood := os.Getenv("TOKEN_USDC_ROBINHOOD")
+	tokenAMZN_Robinhood := os.Getenv("TOKEN_AMZN_ROBINHOOD")
+
+	// Use chain IDs from env (RPC ChainID() can be unreliable on testnets)
+	baseChainIDInt, _ := strconv.ParseInt(os.Getenv("CHAIN_1_ID"), 10, 64)
+	robinhoodChainIDInt, _ := strconv.ParseInt(os.Getenv("CHAIN_2_ID"), 10, 64)
+	baseChainID := big.NewInt(baseChainIDInt)
+	robinhoodChainID := big.NewInt(robinhoodChainIDInt)
 
 	// Connect to chains
 	fmt.Println("Connecting to networks...")
@@ -63,8 +73,6 @@ func main() {
 	robinhoodClient, err := ethclient.Dial(robinhoodRPC)
 	fatal(err, "connect to Robinhood")
 
-	baseChainID, _ := baseClient.ChainID(ctx)
-	robinhoodChainID, _ := robinhoodClient.ChainID(ctx)
 	fmt.Printf("  Base: chain %s, block %d\n", baseChainID, mustBlock(ctx, baseClient))
 	fmt.Printf("  Robinhood: chain %s, block %d\n\n", robinhoodChainID, mustBlock(ctx, robinhoodClient))
 
@@ -149,17 +157,19 @@ func main() {
 		utils.GenerateRandomAddress().Hex(),
 		utils.GenerateRandomAddress().Hex(),
 	}
+	// 0.1 AMZN per tranche (18 decimals), split across 3 recipients
+	// 1000:1 ratio: 100 USDC -> 0.1 AMZN
 	recipientAmounts := []string{
-		utils.ParseToken("30", 6).String(),
-		utils.ParseToken("35", 6).String(),
-		utils.ParseToken("30", 6).String(),
+		utils.ParseToken("0.03", 18).String(),
+		utils.ParseToken("0.04", 18).String(),
+		utils.ParseToken("0.03", 18).String(),
 	}
 
 	now := time.Now().Unix()
 	orderParams := map[string]interface{}{
 		"user":            freshWallet.Address.Hex(),
 		"assetIn":         tokenUSDC_Base,
-		"assetOut":        tokenUSDC_Robinhood,
+		"assetOut":        tokenAMZN_Robinhood,
 		"chainIn":         "base",
 		"chainOut":        "robinhood",
 		"sourceChainId":   baseChainID.Int64(),
@@ -175,13 +185,28 @@ func main() {
 	}
 
 	plaintext, _ := json.Marshal(orderParams)
+	fmt.Printf("  DEBUG raw JSON: %s\n", string(plaintext))
 	encrypted, err := ecies.Encrypt(pubKey, plaintext)
 	fatal(err, "encrypt order")
 	encryptedHex := hex.EncodeToString(encrypted)
 
 	fmt.Printf("  Order encrypted (%d bytes)\n", len(encrypted))
-	fmt.Printf("  Params: 3 tranches x 100 USDC, 5s apart\n")
-	fmt.Printf("  Route: Base (USDC) -> Robinhood (USDC)\n\n")
+	fmt.Printf("  Params: 3 tranches x 100 USDC, 5s apart (1000:1 -> 0.1 AMZN each)\n")
+	fmt.Printf("  Route: Base (USDC) -> Robinhood (AMZN) @ 1000:1\n\n")
+
+	// ============================================================
+	// Step 3b: Sign message to prove ownership of the wallet
+	// ============================================================
+	fmt.Println("Step 3b: Signing authentication message...")
+	signMessage := fmt.Sprintf("tachyon-twap:%s:%d", freshWallet.Address.Hex(), now)
+	signHash := signEthMessage(signMessage)
+	sig, err := crypto.Sign(signHash, freshWallet.PrivateKey)
+	fatal(err, "sign message")
+	// Convert v from 0/1 to 27/28 (Ethereum convention)
+	sig[64] += 27
+	sigHex := hex.EncodeToString(sig)
+	fmt.Printf("  Signed message: %s\n", signMessage)
+	fmt.Printf("  Signature: 0x%s...%s\n\n", sigHex[:8], sigHex[len(sigHex)-8:])
 
 	// ============================================================
 	// Step 4: Submit encrypted TWAP order
@@ -190,6 +215,8 @@ func main() {
 
 	reqBody, _ := json.Marshal(map[string]string{
 		"encryptedData": encryptedHex,
+		"signature":     sigHex,
+		"message":       signMessage,
 	})
 
 	resp, err := http.Post(twapURL+"/twap/create", "application/json", bytes.NewReader(reqBody))
@@ -490,6 +517,12 @@ func checkSolved(ctx context.Context, bridge *bind.BoundContract, sourceChainID,
 		return false
 	}
 	return result[0].(bool)
+}
+
+// signEthMessage produces the Ethereum personal_sign hash: keccak256("\x19Ethereum Signed Message:\n" + len(msg) + msg)
+func signEthMessage(message string) []byte {
+	prefixed := fmt.Sprintf("\x19Ethereum Signed Message:\n%d%s", len(message), message)
+	return crypto.Keccak256([]byte(prefixed))
 }
 
 // Ensure unused imports don't cause issues

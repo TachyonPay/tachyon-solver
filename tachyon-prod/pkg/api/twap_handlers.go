@@ -61,7 +61,7 @@ func (t *TWAPAPI) createOrder(c *gin.Context) {
 		return
 	}
 
-	order, err := t.engine.DecryptAndCreateOrder(req.EncryptedData)
+	order, err := t.engine.DecryptAndCreateOrder(req.EncryptedData, req.Signature, req.Message)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, types.TWAPOrderResponse{
 			Success: false,
@@ -96,6 +96,8 @@ func (t *TWAPAPI) getOrderStatus(c *gin.Context) {
 		TranchesFilled: order.TranchesFilled,
 		TotalTranches:  order.TotalTranches,
 		AmountSpent:    order.AmountSpent,
+		IntentIDs:      order.IntentIDs,
+		SourceChainID:  order.SourceChainID,
 	})
 }
 

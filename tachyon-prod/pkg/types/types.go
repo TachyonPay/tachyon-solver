@@ -215,6 +215,7 @@ type TWAPOrder struct {
 	TranchesFilled  int       `json:"tranchesFilled"`  // Number of tranches executed
 	TotalTranches   int       `json:"totalTranches"`   // Total expected tranches
 	AmountSpent     string    `json:"amountSpent"`     // Total assetIn spent so far
+	IntentIDs       []string  `json:"intentIds"`       // On-chain intent IDs created per tranche (frontend can check status directly)
 	CreatedAt       time.Time `json:"createdAt"`
 	LastExecutedAt  time.Time `json:"lastExecutedAt,omitempty"`
 }
@@ -223,6 +224,8 @@ type TWAPOrder struct {
 // The entire request is ECIES-encrypted by the client
 type CreateTWAPRequest struct {
 	EncryptedData string `json:"encryptedData" binding:"required"` // ECIES encrypted JSON of TWAPOrderParams
+	Signature     string `json:"signature" binding:"required"`     // Hex-encoded signature of the message
+	Message       string `json:"message" binding:"required"`       // Message that was signed (e.g. "tachyon-twap:<userAddress>:<timestamp>")
 }
 
 // TWAPOrderParams is the decrypted contents of a CreateTWAPRequest
@@ -254,13 +257,15 @@ type TWAPOrderResponse struct {
 
 // TWAPStatusResponse is the response for querying TWAP order status
 type TWAPStatusResponse struct {
-	Success        bool   `json:"success"`
-	OrderID        string `json:"orderId"`
-	Status         string `json:"status"`
-	TranchesFilled int    `json:"tranchesFilled"`
-	TotalTranches  int    `json:"totalTranches"`
-	AmountSpent    string `json:"amountSpent"`
-	Error          string `json:"error,omitempty"`
+	Success        bool     `json:"success"`
+	OrderID        string   `json:"orderId"`
+	Status         string   `json:"status"`
+	TranchesFilled int      `json:"tranchesFilled"`
+	TotalTranches  int      `json:"totalTranches"`
+	AmountSpent    string   `json:"amountSpent"`
+	IntentIDs      []string `json:"intentIds"`       // On-chain intent IDs for frontend to check contract status
+	SourceChainID  int64    `json:"sourceChainId"`   // Chain where intents were created
+	Error          string   `json:"error,omitempty"`
 }
 
 // GetRoutesResponse is the response from get routes endpoint

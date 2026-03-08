@@ -109,8 +109,49 @@ func (e *Engine) GetAddress() string {
 	return e.address.Hex()
 }
 
-// DecryptAndCreateOrder decrypts the ECIES-encrypted order params and creates a TWAP order
-func (e *Engine) DecryptAndCreateOrder(encryptedHex string) (*types.TWAPOrder, error) {
+// VerifySignature recovers the signer from an Ethereum personal_sign signature
+// and returns the recovered address. Message should be the raw string that was signed.
+func (e *Engine) VerifySignature(message, signatureHex string) (common.Address, error) {
+	sigBytes, err := hex.DecodeString(strings.TrimPrefix(signatureHex, "0x"))
+	if err != nil {
+		return common.Address{}, fmt.Errorf("invalid signature hex: %w", err)
+	}
+	if len(sigBytes) != 65 {
+		return common.Address{}, fmt.Errorf("signature must be 65 bytes, got %d", len(sigBytes))
+	}
+
+	// Ethereum personal_sign: "\x19Ethereum Signed Message:\n" + len(msg) + msg
+	prefixed := fmt.Sprintf("\x19Ethereum Signed Message:\n%d%s", len(message), message)
+	hash := crypto.Keccak256Hash([]byte(prefixed))
+
+	// Fix recovery ID (v): MetaMask uses 27/28, go-ethereum expects 0/1
+	if sigBytes[64] >= 27 {
+		sigBytes[64] -= 27
+	}
+
+	pubKey, err := crypto.SigToPub(hash.Bytes(), sigBytes)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("failed to recover public key: %w", err)
+	}
+
+	return crypto.PubkeyToAddress(*pubKey), nil
+}
+
+// DecryptAndCreateOrder decrypts the ECIES-encrypted order params, verifies the
+// signature matches the user in the order, and creates a TWAP order.
+func (e *Engine) DecryptAndCreateOrder(encryptedHex, signature, message string) (*types.TWAPOrder, error) {
+	// Step 1: Verify signature and recover signer
+	signer, err := e.VerifySignature(message, signature)
+	if err != nil {
+		return nil, fmt.Errorf("signature verification failed: %w", err)
+	}
+
+	log.WithFields(log.Fields{
+		"signer":  signer.Hex(),
+		"message": message,
+	}).Info("Signature verified, recovered signer")
+
+	// Step 2: Decrypt order
 	encryptedBytes, err := hex.DecodeString(encryptedHex)
 	if err != nil {
 		return nil, fmt.Errorf("invalid encrypted data hex: %w", err)
@@ -121,9 +162,22 @@ func (e *Engine) DecryptAndCreateOrder(encryptedHex string) (*types.TWAPOrder, e
 		return nil, fmt.Errorf("failed to decrypt TWAP order: %w", err)
 	}
 
+	log.WithField("decrypted", string(decryptedBytes)).Debug("Decrypted TWAP order payload")
+
 	var params types.TWAPOrderParams
 	if err := json.Unmarshal(decryptedBytes, &params); err != nil {
 		return nil, fmt.Errorf("invalid decrypted order format: %w", err)
+	}
+
+	log.WithFields(log.Fields{
+		"sourceChainId": params.SourceChainID,
+		"destChainId":   params.DestChainID,
+		"user":          params.User,
+	}).Info("Parsed TWAP order params")
+
+	// Step 3: Verify signer matches the user in the decrypted order
+	if !strings.EqualFold(signer.Hex(), params.User) {
+		return nil, fmt.Errorf("signer %s does not match order user %s", signer.Hex(), params.User)
 	}
 
 	return e.CreateOrder(&params)
@@ -407,6 +461,7 @@ func (e *Engine) executeTranche(order *types.TWAPOrder) {
 	// Update order state
 	e.mu.Lock()
 	order.TranchesFilled++
+	order.IntentIDs = append(order.IntentIDs, intentID)
 	spent, _ := new(big.Int).SetString(order.AmountSpent, 10)
 	spent.Add(spent, amountPerPeriod)
 	order.AmountSpent = spent.String()
