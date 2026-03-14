@@ -42,6 +42,7 @@ func (api *RelayerAPI) RegisterRoutes(r *gin.Engine) {
 	r.POST("/recipient/generate-stealth", api.GenerateStealthAddress)
 	r.POST("/recipient/derive-stealth-key", api.DeriveStealthKey)
 	r.POST("/recipient/deploy-safe", api.DeploySafe)
+	r.POST("/recipient/relay-proxy", api.RelayProxy)
 }
 
 // RegisterAdminRoutes registers admin-only routes (call with auth middleware group)
@@ -390,6 +391,31 @@ func (api *RelayerAPI) DeploySafe(c *gin.Context) {
 	response, err := api.relayer.DeploySafe(c.Request.Context(), &req)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, types.DeploySafeResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// RelayProxy broadcasts a pre-signed Safe transaction. The caller signs the Safe tx hash
+// with their stealth private key; the relayer pays gas and calls execTransaction.
+func (api *RelayerAPI) RelayProxy(c *gin.Context) {
+	var req types.RelayProxyRequest
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, types.RelayProxyResponse{
+			Success: false,
+			Error:   "Invalid request body: " + err.Error(),
+		})
+		return
+	}
+
+	response, err := api.relayer.RelayProxy(c.Request.Context(), &req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, types.RelayProxyResponse{
 			Success: false,
 			Error:   err.Error(),
 		})

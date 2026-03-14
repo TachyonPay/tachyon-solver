@@ -312,3 +312,24 @@ type DeriveStealthKeyResponse struct {
 	StealthPrivateKey string `json:"stealthPrivateKey"` // Hex-encoded private key
 	Error             string `json:"error,omitempty"`
 }
+
+// RelayProxyRequest asks the relayer to broadcast a pre-signed Safe transaction.
+// The caller derives the stealth key, signs the Safe tx hash themselves, and
+// sends the signature here. The relayer pays gas and calls execTransaction.
+type RelayProxyRequest struct {
+	SafeAddress string `json:"safeAddress" binding:"required"` // Safe proxy address
+	ChainID     string `json:"chainId" binding:"required"`
+	// execTransaction params
+	To        string `json:"to" binding:"required"`   // target address
+	Value     string `json:"value"`                   // ETH value in wei (default "0")
+	Data      string `json:"data"`                    // hex-encoded calldata (default "0x")
+	Operation uint8  `json:"operation"`               // 0=Call, 1=DelegateCall
+	Signature string `json:"signature" binding:"required"` // 65-byte sig from stealth key over Safe tx hash
+}
+
+// RelayProxyResponse returns the broadcast tx hash
+type RelayProxyResponse struct {
+	Success bool   `json:"success"`
+	TxHash  string `json:"txHash,omitempty"`
+	Error   string `json:"error,omitempty"`
+}

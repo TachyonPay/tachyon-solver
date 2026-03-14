@@ -568,3 +568,89 @@ func (c *Client) GetTokenBalance(ctx context.Context, owner, token common.Addres
 
 	return balance, nil
 }
+
+// Safe execTransaction ABI (minimal)
+const safeExecABI = `[
+  {"inputs":[],"name":"nonce","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
+  {"inputs":[{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"value","type":"uint256"},{"internalType":"bytes","name":"data","type":"bytes"},{"internalType":"uint8","name":"operation","type":"uint8"},{"internalType":"uint256","name":"safeTxGas","type":"uint256"},{"internalType":"uint256","name":"baseGas","type":"uint256"},{"internalType":"uint256","name":"gasPrice","type":"uint256"},{"internalType":"address","name":"gasToken","type":"address"},{"internalType":"address payable","name":"refundReceiver","type":"address"},{"internalType":"bytes","name":"signatures","type":"bytes"}],"name":"execTransaction","outputs":[{"internalType":"bool","name":"success","type":"bool"}],"stateMutability":"payable","type":"function"},
+  {"inputs":[{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"value","type":"uint256"},{"internalType":"bytes","name":"data","type":"bytes"},{"internalType":"uint8","name":"operation","type":"uint8"},{"internalType":"uint256","name":"safeTxGas","type":"uint256"},{"internalType":"uint256","name":"baseGas","type":"uint256"},{"internalType":"uint256","name":"gasPrice","type":"uint256"},{"internalType":"address","name":"gasToken","type":"address"},{"internalType":"address","name":"refundReceiver","type":"address"},{"internalType":"uint256","name":"_nonce","type":"uint256"}],"name":"getTransactionHash","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"}
+]`
+
+// RelaySafeTransaction broadcasts a pre-signed Safe transaction on behalf of a Safe owner.
+// The caller provides a signature over the Safe transaction hash (EIP-712 Safe domain).
+// The relayer pays gas by calling execTransaction with its own key.
+func (c *Client) RelaySafeTransaction(ctx context.Context, safeAddr common.Address, to common.Address, value *big.Int, data []byte, operation uint8, signature []byte) (*types.Transaction, error) {
+	safeABI, err := abi.JSON(strings.NewReader(safeExecABI))
+	if err != nil {
+		return nil, fmt.Errorf("parse safe ABI: %w", err)
+	}
+
+	safe := bind.NewBoundContract(safeAddr, safeABI, c.ethClient, c.ethClient, c.ethClient)
+
+	// Fetch Safe nonce
+	var nonceResult []interface{}
+	if err := safe.Call(&bind.CallOpts{Context: ctx}, &nonceResult, "nonce"); err != nil {
+		return nil, fmt.Errorf("get safe nonce: %w", err)
+	}
+	safeNonce := nonceResult[0].(*big.Int)
+
+	// Verify signature against Safe tx hash (call getTransactionHash on-chain)
+	var hashResult []interface{}
+	if err := safe.Call(&bind.CallOpts{Context: ctx}, &hashResult, "getTransactionHash",
+		to, value, data, operation,
+		big.NewInt(0), big.NewInt(0), big.NewInt(0),
+		common.Address{}, common.Address{},
+		safeNonce,
+	); err != nil {
+		return nil, fmt.Errorf("get transaction hash: %w", err)
+	}
+	txHash := hashResult[0].([32]byte)
+
+	// Recover signer from signature and verify it's an owner of the Safe
+	sigCopy := make([]byte, 65)
+	copy(sigCopy, signature)
+	if sigCopy[64] >= 27 {
+		sigCopy[64] -= 27
+	}
+	pubKey, err := crypto.SigToPub(txHash[:], sigCopy)
+	if err != nil {
+		return nil, fmt.Errorf("recover signer: %w", err)
+	}
+	signer := crypto.PubkeyToAddress(*pubKey)
+	log.WithFields(log.Fields{
+		"safe":   safeAddr.Hex(),
+		"signer": signer.Hex(),
+	}).Info("Relaying Safe transaction")
+
+	// Build the signature in Safe format (r, s, v — 65 bytes)
+	// Safe expects v to be 27 or 28 for EOA signatures
+	safeSig := make([]byte, 65)
+	copy(safeSig, signature)
+	if safeSig[64] < 27 {
+		safeSig[64] += 27
+	}
+
+	auth, err := c.getTransactOpts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	auth.GasLimit = uint64(300000)
+
+	tx, err := safe.Transact(auth, "execTransaction",
+		to, value, data, operation,
+		big.NewInt(0), big.NewInt(0), big.NewInt(0),
+		common.Address{}, common.Address{},
+		safeSig,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("execTransaction: %w", err)
+	}
+
+	log.WithFields(log.Fields{
+		"safe":   safeAddr.Hex(),
+		"to":     to.Hex(),
+		"txHash": tx.Hash().Hex(),
+	}).Info("Safe transaction relayed")
+
+	return tx, nil
+}

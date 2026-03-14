@@ -285,6 +285,54 @@ func (r *Relayer) DeriveStealthKey(req *types.DeriveStealthKeyRequest) (*types.D
 	}, nil
 }
 
+// RelayProxy broadcasts a pre-signed Safe transaction on behalf of a Safe owner.
+// The caller signs the Safe tx hash with the stealth private key and sends the signature.
+// The relayer calls execTransaction using its own wallet (pays gas).
+func (r *Relayer) RelayProxy(ctx context.Context, req *types.RelayProxyRequest) (*types.RelayProxyResponse, error) {
+	safeAddr := common.HexToAddress(req.SafeAddress)
+	toAddr := common.HexToAddress(req.To)
+
+	value := new(big.Int)
+	if req.Value != "" && req.Value != "0" {
+		if _, ok := value.SetString(req.Value, 10); !ok {
+			return nil, fmt.Errorf("invalid value: %s", req.Value)
+		}
+	}
+
+	data := []byte{}
+	if req.Data != "" && req.Data != "0x" {
+		hexStr := strings.TrimPrefix(req.Data, "0x")
+		var err error
+		data, err = hex.DecodeString(hexStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid data hex: %w", err)
+		}
+	}
+
+	sigBytes, err := hex.DecodeString(strings.TrimPrefix(req.Signature, "0x"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid signature hex: %w", err)
+	}
+
+	client, ok := r.clients[req.ChainID]
+	if !ok {
+		return nil, fmt.Errorf("chain %s not configured", req.ChainID)
+	}
+
+	r.txMutexes[req.ChainID].Lock()
+	defer r.txMutexes[req.ChainID].Unlock()
+
+	tx, err := client.RelaySafeTransaction(ctx, safeAddr, toAddr, value, data, req.Operation, sigBytes)
+	if err != nil {
+		return nil, fmt.Errorf("relay failed: %w", err)
+	}
+
+	return &types.RelayProxyResponse{
+		Success: true,
+		TxHash:  tx.Hash().Hex(),
+	}, nil
+}
+
 // DeploySafe deploys a Safe smart account on a stealth address.
 // Anyone can call this endpoint, but must provide a valid signature from
 // the stealth address's spend private key.
