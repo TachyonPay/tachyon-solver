@@ -161,8 +161,8 @@ func (r *Relayer) GenerateStealthAddress(req *types.GenerateStealthRequest) (*ty
 		return nil, fmt.Errorf("failed to derive stealth address: %w", err)
 	}
 
-	// Predict the Safe address controlled by this stealth EOA
-	predictedSafe, err := blockchain.PredictSafeAddressForOwner(stealthAddr)
+	// Predict the Safe address controlled by this stealth EOA (chain-specific)
+	predictedSafe, err := blockchain.PredictSafeAddressForOwnerOnChain(stealthAddr, chainID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to predict safe address: %w", err)
 	}
