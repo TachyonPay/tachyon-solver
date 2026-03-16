@@ -59,7 +59,19 @@ const config: HardhatUserConfig = {
       url: process.env.MAINNET_RPC_URL || "",
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
       chainId: 1,
-    }
+    },
+    horizen_mainnet: {
+      url: process.env.HORIZEN_MAINNET_RPC_URL || "https://horizen.calderachain.xyz/http",
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+      chainId: 26514,
+      gasPrice: "auto",
+    },
+    base_mainnet: {
+      url: process.env.BASE_MAINNET_RPC_URL || "https://1rpc.io/base",
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+      chainId: 8453,
+      gasPrice: "auto",
+    },
   },
   etherscan: {
     apiKey: {

@@ -35,6 +35,12 @@ var safeAddressByChainID = map[uint64]safeChainAddresses{
 		ProxyFactory:    common.HexToAddress("0xFa9F3c193aDF8cac3B20bae2a74A46A6a6116299"),
 		FallbackHandler: common.HexToAddress("0x0698728CF22ABfD577448237C90168b1798469Fd"),
 	},
+	// Horizen Mainnet (chain 26514) — canonical Safe not deployed, using custom deployment
+	26514: {
+		Singleton:       common.HexToAddress("0xa094A7f24cAE18d757911BF3965Eff3b8E3C9303"),
+		ProxyFactory:    common.HexToAddress("0x028BE4fBe1027f224648865c9444c1aCFA79a5A3"),
+		FallbackHandler: common.HexToAddress("0xDE06437f29Bcb7E3BfF7b4916eD9b2DEAD103204"),
+	},
 }
 
 // getSafeAddresses returns the Safe contract addresses for a given chain ID.

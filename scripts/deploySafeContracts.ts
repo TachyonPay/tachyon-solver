@@ -10,7 +10,7 @@
 
 import { ethers } from "hardhat";
 
-const RPC_URL = "https://horizen-rpc-testnet.appchain.base.org";
+const RPC_URL = process.env.SAFE_DEPLOY_RPC || "https://horizen-rpc-testnet.appchain.base.org";
 
 // Canonical addresses (for checking — these are what we want to match)
 const CANONICAL_SINGLETON        = "0xd9Db270c1B5E3Bd161E8c8503c55cEABeE709552";

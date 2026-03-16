@@ -1,0 +1,20 @@
+{
+  "timestamp": "2026-03-16T09:44:36.741Z",
+  "deployer": "0xC3A25467366AefC281e13AF977bB7F052f90FF2a",
+  "chains": {
+    "horizen_mainnet": {
+      "chainId": 26514,
+      "bridge": "0x1809703DE921177cca0f1c80FB58D788E09AdDB4",
+      "usdc": "0x52F77B624a9f20d41a60eF550e5792a00747262c",
+      "rpc": "https://horizen.calderachain.xyz/http",
+      "explorer": "https://horizen.calderaexplorer.xyz"
+    },
+    "base_mainnet": {
+      "chainId": 8453,
+      "bridge": "0x52F77B624a9f20d41a60eF550e5792a00747262c",
+      "usdc": "0xfaAd7d5c3286B142d7854F75c9B0ad3F6A803F03",
+      "rpc": "https://1rpc.io/base",
+      "explorer": "https://basescan.org"
+    }
+  }
+}
