@@ -561,21 +561,6 @@ func (s *Solver) calculateProfitableBid(ctx context.Context, networkKey string, 
 
 	targetBidFloat := new(big.Float).Sub(minBidFloat, marginAmount)
 
-	// Get token decimals to calculate appropriate gas buffer
-	client := s.clients[networkKey]
-	tokenAAddr := common.HexToAddress(intent.TokenA)
-	decimals, err := client.GetTokenDecimals(ctx, tokenAAddr)
-	if err != nil {
-		log.WithError(err).Warn("Failed to get token decimals, defaulting to 18")
-		decimals = 18
-	}
-
-	// Subtract a small gas buffer (e.g., 2 tokens) based on actual token decimals
-	gasBuffer := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
-	gasBuffer = new(big.Int).Mul(gasBuffer, big.NewInt(2)) // 2 tokens
-	gasBufferFloat := new(big.Float).SetInt(gasBuffer)
-	targetBidFloat = new(big.Float).Sub(targetBidFloat, gasBufferFloat)
-
 	targetBid, _ := targetBidFloat.Int(nil)
 
 	// Ensure bid is not negative (which would wrap around to MAX_UINT256)
@@ -583,8 +568,6 @@ func (s *Solver) calculateProfitableBid(ctx context.Context, networkKey string, 
 		log.WithFields(log.Fields{
 			"minBid":       minBid.String(),
 			"profitMargin": s.cfg.SolverConfig.MinProfitMargin,
-			"decimals":     decimals,
-			"gasBuffer":    gasBuffer.String(),
 			"targetBid":    targetBid.String(),
 		}).Info("Calculated bid is negative or zero, not profitable")
 		return false, nil
@@ -593,10 +576,11 @@ func (s *Solver) calculateProfitableBid(ctx context.Context, networkKey string, 
 	log.WithFields(log.Fields{
 		"minBid":       minBid.String(),
 		"profitMargin": s.cfg.SolverConfig.MinProfitMargin,
-		"decimals":     decimals,
-		"gasBuffer":    gasBuffer.String(),
 		"targetBid":    targetBid.String(),
 	}).Debug("Calculated bid amount")
+
+	client := s.clients[networkKey]
+	tokenAAddr := common.HexToAddress(intent.TokenA)
 	balance, err := client.GetBalance(ctx, tokenAAddr)
 	if err != nil {
 		log.WithError(err).Error("Failed to get TokenA balance")
