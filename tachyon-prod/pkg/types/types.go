@@ -12,6 +12,7 @@ type NetworkConfig struct {
 	ChainID       *big.Int
 	BridgeAddress string
 	Explorer      string
+	SafeAddress   string // optional: Gnosis Safe holding liquidity on this chain
 }
 
 // ChainPair represents a source-destination chain pair configuration

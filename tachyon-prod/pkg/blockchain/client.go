@@ -1,10 +1,12 @@
 package blockchain
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"fmt"
 	"math/big"
+	"sort"
 	"strings"
 
 	"github.com/ethereum/go-ethereum"
@@ -22,19 +24,23 @@ const bridgeIntentABI = `[{"inputs":[{"internalType":"uint256","name":"_chainId"
 
 // Client wraps Ethereum client with contract interaction
 type Client struct {
-	ethClient      *ethclient.Client
-	contractAddr   common.Address
-	contract       *bind.BoundContract
-	contractABI    abi.ABI
-	privateKey     *ecdsa.PrivateKey
-	publicKey      *ecdsa.PublicKey
-	address        common.Address
-	chainID        *big.Int
-	networkName    string
+	ethClient       *ethclient.Client
+	contractAddr    common.Address
+	contract        *bind.BoundContract
+	contractABI     abi.ABI
+	privateKey      *ecdsa.PrivateKey
+	publicKey       *ecdsa.PublicKey
+	address         common.Address
+	safeAddress     common.Address    // zero if no Safe configured
+	safeSigningKeys []*ecdsa.PrivateKey // TEE keys that co-sign Safe transactions
+	chainID         *big.Int
+	networkName     string
 }
 
-// NewClient creates a new blockchain client
-func NewClient(rpcURL string, contractAddress string, privateKeyHex string, chainID *big.Int, networkName string) (*Client, error) {
+// NewClient creates a new blockchain client.
+// safeAddress: Gnosis Safe address on this chain — empty string if not using a Safe.
+// safeSigningKeys: the TEE private keys that co-sign Safe transactions (all must sign to reach threshold).
+func NewClient(rpcURL string, contractAddress string, privateKeyHex string, chainID *big.Int, networkName string, safeAddress string, safeSigningKeys []*ecdsa.PrivateKey) (*Client, error) {
 	ethClient, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Ethereum client: %w", err)
@@ -62,23 +68,50 @@ func NewClient(rpcURL string, contractAddress string, privateKeyHex string, chai
 
 	address := crypto.PubkeyToAddress(*publicKeyECDSA)
 
+	var safeAddr common.Address
+	if safeAddress != "" {
+		safeAddr = common.HexToAddress(safeAddress)
+	}
+
 	log.WithFields(log.Fields{
-		"network": networkName,
-		"address": address.Hex(),
-		"chainID": chainID,
+		"network":     networkName,
+		"address":     address.Hex(),
+		"chainID":     chainID,
+		"safeAddress": safeAddr.Hex(),
 	}).Info("Blockchain client initialized")
 
 	return &Client{
-		ethClient:    ethClient,
-		contractAddr: contractAddr,
-		contract:     contract,
-		contractABI:  contractABI,
-		privateKey:   privateKey,
-		publicKey:    publicKeyECDSA,
-		address:      address,
-		chainID:      chainID,
-		networkName:  networkName,
+		ethClient:       ethClient,
+		contractAddr:    contractAddr,
+		contract:        contract,
+		contractABI:     contractABI,
+		privateKey:      privateKey,
+		publicKey:       publicKeyECDSA,
+		address:         address,
+		safeAddress:     safeAddr,
+		safeSigningKeys: safeSigningKeys,
+		chainID:         chainID,
+		networkName:     networkName,
 	}, nil
+}
+
+// HasSafe returns true if this client is configured with a Gnosis Safe.
+func (c *Client) HasSafe() bool {
+	return c.safeAddress != (common.Address{})
+}
+
+// GetSafeAddress returns the Safe address (zero address if not configured).
+func (c *Client) GetSafeAddress() common.Address {
+	return c.safeAddress
+}
+
+// GetSolverAddress returns the effective solver address: the Safe if configured, otherwise the EOA.
+// This is the address that appears as msg.sender for all token-moving transactions.
+func (c *Client) GetSolverAddress() common.Address {
+	if c.HasSafe() {
+		return c.safeAddress
+	}
+	return c.address
 }
 
 // GetAddress returns the wallet address
@@ -106,7 +139,7 @@ func (c *Client) GetBalance(ctx context.Context, tokenAddress common.Address) (*
 	tokenContract := bind.NewBoundContract(tokenAddress, parsedABI, c.ethClient, c.ethClient, c.ethClient)
 
 	var balance []interface{}
-	err = tokenContract.Call(&bind.CallOpts{Context: ctx}, &balance, "balanceOf", c.address)
+	err = tokenContract.Call(&bind.CallOpts{Context: ctx}, &balance, "balanceOf", c.GetSolverAddress())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get token balance: %w", err)
 	}
@@ -139,6 +172,33 @@ func (c *Client) GetTokenDecimals(ctx context.Context, tokenAddress common.Addre
 	}
 
 	return decimals[0].(uint8), nil
+}
+
+// GetTokenSymbol retrieves the symbol of an ERC20 token
+func (c *Client) GetTokenSymbol(ctx context.Context, tokenAddress common.Address) (string, error) {
+	tokenABI := `[{"constant":true,"inputs":[],"name":"symbol","outputs":[{"name":"","type":"string"}],"type":"function"}]`
+	parsedABI, err := abi.JSON(strings.NewReader(tokenABI))
+	if err != nil {
+		return "", fmt.Errorf("failed to parse token ABI: %w", err)
+	}
+
+	tokenContract := bind.NewBoundContract(tokenAddress, parsedABI, c.ethClient, c.ethClient, c.ethClient)
+
+	var result []interface{}
+	if err := tokenContract.Call(&bind.CallOpts{Context: ctx}, &result, "symbol"); err != nil {
+		return "", fmt.Errorf("failed to get token symbol: %w", err)
+	}
+
+	if len(result) == 0 {
+		return "", fmt.Errorf("empty response from symbol()")
+	}
+
+	symbol, ok := result[0].(string)
+	if !ok {
+		return "", fmt.Errorf("unexpected type for symbol response")
+	}
+
+	return symbol, nil
 }
 
 // GetIntent retrieves an intent from the contract
@@ -576,9 +636,9 @@ const safeExecABI = `[
   {"inputs":[{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"value","type":"uint256"},{"internalType":"bytes","name":"data","type":"bytes"},{"internalType":"uint8","name":"operation","type":"uint8"},{"internalType":"uint256","name":"safeTxGas","type":"uint256"},{"internalType":"uint256","name":"baseGas","type":"uint256"},{"internalType":"uint256","name":"gasPrice","type":"uint256"},{"internalType":"address","name":"gasToken","type":"address"},{"internalType":"address","name":"refundReceiver","type":"address"},{"internalType":"uint256","name":"_nonce","type":"uint256"}],"name":"getTransactionHash","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"}
 ]`
 
-// RelaySafeTransaction broadcasts a pre-signed Safe transaction on behalf of a Safe owner.
-// The caller provides a signature over the Safe transaction hash (EIP-712 Safe domain).
-// The relayer pays gas by calling execTransaction with its own key.
+// RelaySafeTransaction broadcasts a pre-signed Safe transaction on behalf of an external signer.
+// Used by the relayer to submit user-provided signatures (e.g. stealth address relay proxy).
+// The EOA pays gas; the Safe is msg.sender for the inner call.
 func (c *Client) RelaySafeTransaction(ctx context.Context, safeAddr common.Address, to common.Address, value *big.Int, data []byte, operation uint8, signature []byte) (*types.Transaction, error) {
 	safeABI, err := abi.JSON(strings.NewReader(safeExecABI))
 	if err != nil {
@@ -587,14 +647,12 @@ func (c *Client) RelaySafeTransaction(ctx context.Context, safeAddr common.Addre
 
 	safe := bind.NewBoundContract(safeAddr, safeABI, c.ethClient, c.ethClient, c.ethClient)
 
-	// Fetch Safe nonce
 	var nonceResult []interface{}
 	if err := safe.Call(&bind.CallOpts{Context: ctx}, &nonceResult, "nonce"); err != nil {
 		return nil, fmt.Errorf("get safe nonce: %w", err)
 	}
 	safeNonce := nonceResult[0].(*big.Int)
 
-	// Verify signature against Safe tx hash (call getTransactionHash on-chain)
 	var hashResult []interface{}
 	if err := safe.Call(&bind.CallOpts{Context: ctx}, &hashResult, "getTransactionHash",
 		to, value, data, operation,
@@ -606,7 +664,6 @@ func (c *Client) RelaySafeTransaction(ctx context.Context, safeAddr common.Addre
 	}
 	txHash := hashResult[0].([32]byte)
 
-	// Recover signer from signature and verify it's an owner of the Safe
 	sigCopy := make([]byte, 65)
 	copy(sigCopy, signature)
 	if sigCopy[64] >= 27 {
@@ -622,8 +679,6 @@ func (c *Client) RelaySafeTransaction(ctx context.Context, safeAddr common.Addre
 		"signer": signer.Hex(),
 	}).Info("Relaying Safe transaction")
 
-	// Build the signature in Safe format (r, s, v — 65 bytes)
-	// Safe expects v to be 27 or 28 for EOA signatures
 	safeSig := make([]byte, 65)
 	copy(safeSig, signature)
 	if safeSig[64] < 27 {
@@ -651,6 +706,193 @@ func (c *Client) RelaySafeTransaction(ctx context.Context, safeAddr common.Addre
 		"to":     to.Hex(),
 		"txHash": tx.Hash().Hex(),
 	}).Info("Safe transaction relayed")
+
+	return tx, nil
+}
+
+// ExecuteViaSafe signs a call with all configured TEE keys and executes it through the Safe.
+//
+// How it works:
+//  1. Fetches the Safe's current nonce on-chain.
+//  2. Calls Safe.getTransactionHash to get the exact EIP-712 hash the Safe expects.
+//  3. Signs that hash with every key in safeSigningKeys (the 3 TEE keys).
+//  4. Sorts all signatures by their recovered signer address, ascending —
+//     Gnosis Safe validates signatures in this order.
+//  5. Concatenates all 65-byte signatures and calls execTransaction.
+//     The EOA (c.address) pays gas; the Safe is msg.sender for the inner call.
+func (c *Client) ExecuteViaSafe(ctx context.Context, to common.Address, data []byte) (*types.Transaction, error) {
+	if !c.HasSafe() {
+		return nil, fmt.Errorf("no Safe address configured for this client")
+	}
+	if len(c.safeSigningKeys) == 0 {
+		return nil, fmt.Errorf("no Safe signing keys configured — set SAFE_SIGNER_KEY_1/2/3")
+	}
+
+	safeABI, err := abi.JSON(strings.NewReader(safeExecABI))
+	if err != nil {
+		return nil, fmt.Errorf("parse safe ABI: %w", err)
+	}
+	safe := bind.NewBoundContract(c.safeAddress, safeABI, c.ethClient, c.ethClient, c.ethClient)
+
+	// 1. Fetch Safe nonce
+	var nonceResult []interface{}
+	if err := safe.Call(&bind.CallOpts{Context: ctx}, &nonceResult, "nonce"); err != nil {
+		return nil, fmt.Errorf("get safe nonce: %w", err)
+	}
+	safeNonce := nonceResult[0].(*big.Int)
+
+	// 2. Get the Safe tx hash (all gas params zero — EOA pays gas externally)
+	var hashResult []interface{}
+	if err := safe.Call(&bind.CallOpts{Context: ctx}, &hashResult, "getTransactionHash",
+		to, big.NewInt(0), data, uint8(0),
+		big.NewInt(0), big.NewInt(0), big.NewInt(0),
+		common.Address{}, common.Address{},
+		safeNonce,
+	); err != nil {
+		return nil, fmt.Errorf("get transaction hash: %w", err)
+	}
+	txHash := hashResult[0].([32]byte)
+
+	// 3. Sign with every TEE key
+	type sigEntry struct {
+		addr common.Address
+		sig  [65]byte
+	}
+	entries := make([]sigEntry, 0, len(c.safeSigningKeys))
+	for i, key := range c.safeSigningKeys {
+		raw, err := crypto.Sign(txHash[:], key)
+		if err != nil {
+			return nil, fmt.Errorf("sign with TEE key %d: %w", i+1, err)
+		}
+		// Safe expects v = 27 or 28 for EOA signatures
+		if raw[64] < 27 {
+			raw[64] += 27
+		}
+		var s [65]byte
+		copy(s[:], raw)
+		entries = append(entries, sigEntry{
+			addr: crypto.PubkeyToAddress(key.PublicKey),
+			sig:  s,
+		})
+	}
+
+	// 4. Sort by signer address ascending — Gnosis Safe requirement
+	sort.Slice(entries, func(i, j int) bool {
+		return bytes.Compare(entries[i].addr.Bytes(), entries[j].addr.Bytes()) < 0
+	})
+
+	// 5. Concatenate all 65-byte signatures
+	allSigs := make([]byte, 0, len(entries)*65)
+	signerAddrs := make([]string, 0, len(entries))
+	for _, e := range entries {
+		allSigs = append(allSigs, e.sig[:]...)
+		signerAddrs = append(signerAddrs, e.addr.Hex())
+	}
+
+	auth, err := c.getTransactOpts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	auth.GasLimit = uint64(400000)
+
+	tx, err := safe.Transact(auth, "execTransaction",
+		to, big.NewInt(0), data, uint8(0),
+		big.NewInt(0), big.NewInt(0), big.NewInt(0),
+		common.Address{}, common.Address{},
+		allSigs,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("execTransaction: %w", err)
+	}
+
+	log.WithFields(log.Fields{
+		"safe":    c.safeAddress.Hex(),
+		"to":      to.Hex(),
+		"signers": signerAddrs,
+		"txHash":  tx.Hash().Hex(),
+	}).Info("Safe transaction executed with TEE keys")
+
+	return tx, nil
+}
+
+// ApproveTokenViaSafe sends an ERC20 approve from the Safe.
+func (c *Client) ApproveTokenViaSafe(ctx context.Context, tokenAddress common.Address, amount *big.Int) (*types.Transaction, error) {
+	erc20ABI, err := abi.JSON(strings.NewReader(`[{"inputs":[{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"approve","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"}]`))
+	if err != nil {
+		return nil, fmt.Errorf("parse ERC20 ABI: %w", err)
+	}
+
+	data, err := erc20ABI.Pack("approve", c.contractAddr, amount)
+	if err != nil {
+		return nil, fmt.Errorf("pack approve: %w", err)
+	}
+
+	return c.ExecuteViaSafe(ctx, tokenAddress, data)
+}
+
+// PlaceBidViaSafe places a bid on an intent from the Safe.
+func (c *Client) PlaceBidViaSafe(ctx context.Context, intentID *big.Int, bidAmount *big.Int) (*types.Transaction, error) {
+	data, err := c.contractABI.Pack("placeBid", intentID, bidAmount)
+	if err != nil {
+		return nil, fmt.Errorf("pack placeBid: %w", err)
+	}
+
+	tx, err := c.ExecuteViaSafe(ctx, c.contractAddr, data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to place bid via Safe: %w", err)
+	}
+
+	log.WithFields(log.Fields{
+		"safe":      c.safeAddress.Hex(),
+		"intentID":  intentID,
+		"bidAmount": bidAmount,
+		"txHash":    tx.Hash().Hex(),
+	}).Debug("Bid placed via Safe")
+
+	return tx, nil
+}
+
+// DepositAndPickupViaSafe calls depositAndPickup from the Safe (Safe is msg.sender = winningSolver).
+func (c *Client) DepositAndPickupViaSafe(ctx context.Context, intentID *big.Int) (*types.Transaction, error) {
+	data, err := c.contractABI.Pack("depositAndPickup", intentID)
+	if err != nil {
+		return nil, fmt.Errorf("pack depositAndPickup: %w", err)
+	}
+
+	tx, err := c.ExecuteViaSafe(ctx, c.contractAddr, data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to depositAndPickup via Safe: %w", err)
+	}
+
+	log.WithFields(log.Fields{
+		"safe":     c.safeAddress.Hex(),
+		"intentID": intentID,
+		"txHash":   tx.Hash().Hex(),
+	}).Debug("DepositAndPickup executed via Safe")
+
+	return tx, nil
+}
+
+// SolveIntentOnChain2ViaSafe calls solveIntentOnChain2 from the Safe (Safe transfers tokenB to recipients).
+func (c *Client) SolveIntentOnChain2ViaSafe(ctx context.Context, sourceChainID *big.Int, intentID *big.Int, user common.Address, tokenB common.Address, expectedAmountB *big.Int, recipients []common.Address, amounts []*big.Int) (*types.Transaction, error) {
+	data, err := c.contractABI.Pack("solveIntentOnChain2", sourceChainID, intentID, user, tokenB, expectedAmountB, recipients, amounts)
+	if err != nil {
+		return nil, fmt.Errorf("pack solveIntentOnChain2: %w", err)
+	}
+
+	tx, err := c.ExecuteViaSafe(ctx, c.contractAddr, data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to solveIntentOnChain2 via Safe: %w", err)
+	}
+
+	log.WithFields(log.Fields{
+		"safe":          c.safeAddress.Hex(),
+		"sourceChainID": sourceChainID,
+		"intentID":      intentID,
+		"tokenB":        tokenB.Hex(),
+		"recipients":    len(recipients),
+		"txHash":        tx.Hash().Hex(),
+	}).Debug("Intent solved on chain2 via Safe")
 
 	return tx, nil
 }

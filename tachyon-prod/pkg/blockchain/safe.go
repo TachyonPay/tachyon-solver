@@ -41,6 +41,12 @@ var safeAddressByChainID = map[uint64]safeChainAddresses{
 		ProxyFactory:    common.HexToAddress("0x028BE4fBe1027f224648865c9444c1aCFA79a5A3"),
 		FallbackHandler: common.HexToAddress("0xDE06437f29Bcb7E3BfF7b4916eD9b2DEAD103204"),
 	},
+	// Horizen Base Sepolia testnet (chain 2651420)
+	2651420: {
+		Singleton:       common.HexToAddress("0x738F22E651c9310E4e0CAcF6Dc6A975eFf437a68"),
+		ProxyFactory:    common.HexToAddress("0x57111E71e5aD9Fe19CDB21ED51006e3662719b59"),
+		FallbackHandler: common.HexToAddress("0x58583BBee676B00F8EB196d9Ad15699779B9e11D"),
+	},
 }
 
 // getSafeAddresses returns the Safe contract addresses for a given chain ID.

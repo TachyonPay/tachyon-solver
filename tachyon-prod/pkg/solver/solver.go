@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"net/http"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +48,7 @@ type Solver struct {
 	txMutexes          map[string]*sync.Mutex
 	handlingWins       map[string]bool
 	chainPairMap       map[string]string
+	oracle             *priceOracle
 }
 
 // NewSolver creates a new solver instance
@@ -68,6 +72,8 @@ func NewSolver(cfg *config.Config) (*Solver, error) {
 			cfg.PrivateKey,
 			chainCfg.ChainID,
 			chainCfg.Name,
+			chainCfg.SafeAddress,
+			cfg.SafeSignerKeys,
 		)
 		if err != nil {
 			store.Close()
@@ -96,6 +102,7 @@ func NewSolver(cfg *config.Config) (*Solver, error) {
 		txMutexes:          txMutexes,
 		handlingWins:       make(map[string]bool),
 		chainPairMap:       chainPairMap,
+		oracle:             newPriceOracle(),
 	}
 
 	// Load persisted state from DB
@@ -194,7 +201,7 @@ func (s *Solver) Start() error {
 func (s *Solver) RegisterWithRelayer() error {
 	var solverAddr string
 	for _, client := range s.clients {
-		solverAddr = client.GetAddress().Hex()
+		solverAddr = client.GetSolverAddress().Hex()
 		break
 	}
 
@@ -304,6 +311,9 @@ func (s *Solver) bidWorker(networkKey string, workerPool chan bidJob) {
 		s.txMutexes[job.networkKey].Lock()
 
 		tx, err := s.retryTransaction(job.ctx, job.networkKey, "place-bid", func() (*ethtypes.Transaction, error) {
+			if job.client.HasSafe() {
+				return job.client.PlaceBidViaSafe(job.ctx, job.intentID, job.bidAmount)
+			}
 			return job.client.PlaceBid(job.ctx, job.intentID, job.bidAmount)
 		})
 
@@ -361,10 +371,10 @@ func (s *Solver) GetIntentStatus(intentID, network string) (*types.IntentStatus,
 	return status, nil
 }
 
-// GetWalletAddress returns the solver's wallet address
+// GetWalletAddress returns the solver's effective on-chain address (Safe if configured, else EOA).
 func (s *Solver) GetWalletAddress() string {
 	for _, client := range s.clients {
-		return client.GetAddress().Hex()
+		return client.GetSolverAddress().Hex()
 	}
 	return ""
 }
@@ -551,37 +561,112 @@ func (s *Solver) handleNewIntent(ctx context.Context, networkKey string, intentI
 }
 
 // calculateProfitableBid calculates a profitable bid amount.
-// minBid = amountA + reward. Profit margin and balance buffer are applied to calculate target bid.
+//
+// The bid amount is set to (amountA + reward) * (1 - profitMargin). On top of
+// the raw margin check the function fetches live USD prices for TokenA and
+// TokenB from four public APIs (CoinGecko, CoinCap, CryptoCompare, Binance)
+// and verifies that the solver's net gain in TokenA — converted to USD — exceeds
+// the cost of providing expectedAmountB of TokenB on the destination chain.
+// If price data is unavailable from at least two sources the check is skipped and
+// the existing raw-amount logic governs.
 func (s *Solver) calculateProfitableBid(ctx context.Context, networkKey string, intent *types.Intent) (bool, *big.Int) {
+	sourceClient := s.clients[networkKey]
+	tokenAAddr := common.HexToAddress(intent.TokenA)
+
+	// --- 1. Calculate target bid via profit margin ---
 	minBid := new(big.Int).Add(intent.AmountA, intent.Reward)
-
-	profitMargin := new(big.Float).SetFloat64(s.cfg.SolverConfig.MinProfitMargin)
+	profitMarginFloat := new(big.Float).SetFloat64(s.cfg.SolverConfig.MinProfitMargin)
 	minBidFloat := new(big.Float).SetInt(minBid)
-	marginAmount := new(big.Float).Mul(minBidFloat, profitMargin)
-
+	marginAmount := new(big.Float).Mul(minBidFloat, profitMarginFloat)
 	targetBidFloat := new(big.Float).Sub(minBidFloat, marginAmount)
-
 	targetBid, _ := targetBidFloat.Int(nil)
 
-	// Ensure bid is not negative (which would wrap around to MAX_UINT256)
 	if targetBid.Sign() <= 0 {
 		log.WithFields(log.Fields{
 			"minBid":       minBid.String(),
 			"profitMargin": s.cfg.SolverConfig.MinProfitMargin,
-			"targetBid":    targetBid.String(),
 		}).Info("Calculated bid is negative or zero, not profitable")
 		return false, nil
 	}
 
-	log.WithFields(log.Fields{
-		"minBid":       minBid.String(),
-		"profitMargin": s.cfg.SolverConfig.MinProfitMargin,
-		"targetBid":    targetBid.String(),
-	}).Debug("Calculated bid amount")
+	// --- 2. USD profitability check ---
+	symbolA, errA := sourceClient.GetTokenSymbol(ctx, tokenAAddr)
 
-	client := s.clients[networkKey]
-	tokenAAddr := common.HexToAddress(intent.TokenA)
-	balance, err := client.GetBalance(ctx, tokenAAddr)
+	destChainID := intent.DestChainId.String()
+	destClient, destExists := s.clients[destChainID]
+	var symbolB string
+	var errB error
+	if destExists {
+		symbolB, errB = destClient.GetTokenSymbol(ctx, common.HexToAddress(intent.TokenB))
+	} else {
+		errB = fmt.Errorf("destination chain %s not configured", destChainID)
+	}
+
+	if errA != nil || errB != nil {
+		log.WithFields(log.Fields{
+			"tokenAErr": errA,
+			"tokenBErr": errB,
+		}).Debug("Could not resolve token symbols, skipping USD price check")
+	} else {
+		priceA, err := s.oracle.FetchConsensusPrice(symbolA)
+		if err != nil {
+			log.WithError(err).WithField("symbol", symbolA).Debug("Could not fetch TokenA price, skipping USD check")
+		} else {
+			priceB, err := s.oracle.FetchConsensusPrice(symbolB)
+			if err != nil {
+				log.WithError(err).WithField("symbol", symbolB).Debug("Could not fetch TokenB price, skipping USD check")
+			} else {
+				decimalsA, err := sourceClient.GetTokenDecimals(ctx, tokenAAddr)
+				if err != nil {
+					decimalsA = 18
+				}
+				var decimalsB uint8
+				if destExists {
+					decimalsB, err = destClient.GetTokenDecimals(ctx, common.HexToAddress(intent.TokenB))
+					if err != nil {
+						decimalsB = 18
+					}
+				} else {
+					decimalsB = 18
+				}
+
+				// Solver net gain on source chain: amountA + reward - targetBid (= margin * minBid)
+				netGainA := new(big.Int).Sub(minBid, targetBid)
+				netGainAFloat, _ := new(big.Float).SetInt(netGainA).Float64()
+				gainUSD := (netGainAFloat / math.Pow(10, float64(decimalsA))) * priceA
+
+				// Cost of providing expectedAmountB of TokenB on dest chain
+				expectedBFloat, _ := new(big.Float).SetInt(intent.ExpectedAmountB).Float64()
+				costUSD := (expectedBFloat / math.Pow(10, float64(decimalsB))) * priceB
+
+				profitUSD := gainUSD - costUSD
+
+				log.WithFields(log.Fields{
+					"symbolA":      symbolA,
+					"symbolB":      symbolB,
+					"priceA":       priceA,
+					"priceB":       priceB,
+					"decimalsA":    decimalsA,
+					"decimalsB":    decimalsB,
+					"gainUSD":      gainUSD,
+					"costUSD":      costUSD,
+					"profitUSD":    profitUSD,
+				}).Info("USD profitability analysis")
+
+				if profitUSD <= 0 {
+					log.WithFields(log.Fields{
+						"profitUSD": profitUSD,
+						"symbolA":   symbolA,
+						"symbolB":   symbolB,
+					}).Info("Intent not profitable in USD terms, skipping")
+					return false, nil
+				}
+			}
+		}
+	}
+
+	// --- 3. Balance and max-bid guards ---
+	balance, err := sourceClient.GetBalance(ctx, tokenAAddr)
 	if err != nil {
 		log.WithError(err).Error("Failed to get TokenA balance")
 		return false, nil
@@ -609,7 +694,10 @@ func (s *Solver) calculateProfitableBid(ctx context.Context, networkKey string, 
 		return false, nil
 	}
 
-	log.WithField("targetBid", targetBid.String()).Info("Intent is profitable, will bid")
+	log.WithFields(log.Fields{
+		"targetBid":    targetBid.String(),
+		"profitMargin": s.cfg.SolverConfig.MinProfitMargin,
+	}).Info("Intent is profitable, will bid")
 	return true, targetBid
 }
 
@@ -702,7 +790,7 @@ func (s *Solver) startBiddingLoop(ctx context.Context, networkKey string, intent
 					}
 				}
 
-				if intent.WinningSolver == client.GetAddress().Hex() {
+				if intent.WinningSolver == client.GetSolverAddress().Hex() {
 					key := fmt.Sprintf("%s-%s", networkKey, intentID.String())
 
 					s.mu.Lock()
@@ -725,7 +813,7 @@ func (s *Solver) startBiddingLoop(ctx context.Context, networkKey string, intent
 					log.WithFields(log.Fields{
 						"intentID":     intentID,
 						"winner":       intent.WinningSolver,
-						"ourAddr":      client.GetAddress().Hex(),
+						"ourAddr":      client.GetSolverAddress().Hex(),
 						"winningBid":   intent.WinningBid.String(),
 						"ourBid":       currentBid.String(),
 						"hasPlacedBid": hasPlacedBid,
@@ -741,7 +829,7 @@ func (s *Solver) startBiddingLoop(ctx context.Context, networkKey string, intent
 			}
 
 			shouldBid := false
-			isWinning := highestBidder == client.GetAddress()
+			isWinning := highestBidder == client.GetSolverAddress()
 
 			if highestBid.Cmp(big.NewInt(0)) == 0 {
 				shouldBid = true
@@ -880,6 +968,9 @@ func (s *Solver) handleAuctionWon(ctx context.Context, networkKey string, intent
 	defer s.txMutexes[networkKey].Unlock()
 
 	approveTx, err := s.retryTransaction(ctx, networkKey, "approve-tokens", func() (*ethtypes.Transaction, error) {
+		if client.HasSafe() {
+			return client.ApproveTokenViaSafe(ctx, tokenAddr, bidAmount)
+		}
 		return client.ApproveToken(ctx, tokenAddr, bidAmount)
 	})
 	if err != nil {
@@ -893,9 +984,16 @@ func (s *Solver) handleAuctionWon(ctx context.Context, networkKey string, intent
 		return
 	}
 
+	// Stale RPC nodes lag behind confirmed state; wait for Safe nonce to reflect
+	// the approve tx before signing depositAndPickup with the updated nonce.
+	time.Sleep(5 * time.Second)
+
 	log.WithField("intentID", intentID).Debug("Tokens approved, depositing")
 
 	tx, err := s.retryTransaction(ctx, networkKey, "deposit-and-pickup", func() (*ethtypes.Transaction, error) {
+		if client.HasSafe() {
+			return client.DepositAndPickupViaSafe(ctx, intentID)
+		}
 		return client.DepositAndPickup(ctx, intentID)
 	})
 	if err != nil {
@@ -1052,6 +1150,9 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 	defer s.txMutexes[destChainID].Unlock()
 
 	approveTx, err := s.retryTransaction(ctx, destNetwork, "approve-tokenB", func() (*ethtypes.Transaction, error) {
+		if destClient.HasSafe() {
+			return destClient.ApproveTokenViaSafe(ctx, tokenBAddr, totalAmount)
+		}
 		return destClient.ApproveToken(ctx, tokenBAddr, totalAmount)
 	})
 	if err != nil {
@@ -1065,6 +1166,11 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 		return
 	}
 
+	// Wait for RPC state to reflect the approval before simulating solveIntentOnChain2.
+	// Slow testnet nodes (e.g. Base Sepolia public RPC) lag behind confirmed state,
+	// causing eth_estimateGas to see stale allowance = 0 and revert the simulation.
+	time.Sleep(5 * time.Second)
+
 	log.WithField("intentID", intentID).Debug("TokenB approved, solving intent")
 
 	userAddr := common.HexToAddress(intent.User)
@@ -1072,6 +1178,9 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 	sourceChainID := sourceChainCfg.ChainID
 
 	tx, err := s.retryTransaction(ctx, destNetwork, "solve-intent", func() (*ethtypes.Transaction, error) {
+		if destClient.HasSafe() {
+			return destClient.SolveIntentOnChain2ViaSafe(ctx, sourceChainID, intentID, userAddr, tokenBAddr, expectedAmountB, recipientAddrs, amountBigInts)
+		}
 		return destClient.SolveIntentOnChain2(ctx, sourceChainID, intentID, userAddr, tokenBAddr, expectedAmountB, recipientAddrs, amountBigInts)
 	})
 	if err != nil {
@@ -1101,7 +1210,7 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 	}
 	s.mu.RUnlock()
 
-	go s.settleIntent(ctx, sourceNetwork, intentID, intentID, destClient.GetAddress(), depositTxHash, solveTxHash)
+	go s.settleIntent(ctx, sourceNetwork, intentID, intentID, destClient.GetSolverAddress(), destNetwork, depositTxHash, solveTxHash)
 }
 
 // getRecipientsFromRelayer fetches recipient information from the relayer.
@@ -1110,10 +1219,16 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 func (s *Solver) getRecipientsFromRelayer(intentID string, sourceChainID string) ([]string, []string, error) {
 	url := fmt.Sprintf("%s/get-recipients/%s?sourceChainId=%s", s.cfg.RelayerURL, intentID, sourceChainID)
 
+	// Use the source chain's solver address — must match winningSolver on-chain.
+	// Map iteration order is random, so we must look up by sourceChainID explicitly.
 	var solverAddr string
-	for _, client := range s.clients {
-		solverAddr = client.GetAddress().Hex()
-		break
+	if srcClient, exists := s.clients[sourceChainID]; exists {
+		solverAddr = srcClient.GetSolverAddress().Hex()
+	} else {
+		for _, c := range s.clients {
+			solverAddr = c.GetSolverAddress().Hex()
+			break
+		}
 	}
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -1161,13 +1276,13 @@ func (s *Solver) getRecipientsFromRelayer(intentID string, sourceChainID string)
 
 // settleIntent calls the relayer to settle an intent on the source chain
 // Retries with exponential backoff to handle RPC propagation delays on slow chains like Sepolia
-func (s *Solver) settleIntent(ctx context.Context, network string, chain1IntentID, chain2IntentID *big.Int, solverAddr common.Address, depositTxHash, solveTxHash string) {
+func (s *Solver) settleIntent(ctx context.Context, network string, chain1IntentID, chain2IntentID *big.Int, solverAddr common.Address, destChainName string, depositTxHash, solveTxHash string) {
 	settleReq := types.SettleRequest{
 		IntentID:         chain1IntentID.String(),
 		Network:          network,
 		Chain2IntentID:   chain2IntentID.String(),
 		SolverAddress:    solverAddr.Hex(),
-		DestinationChain: "base",
+		DestinationChain: destChainName,
 		DepositTxHash:    depositTxHash,
 		SolveTxHash:      solveTxHash,
 	}
@@ -1312,4 +1427,217 @@ func (s *Solver) persistLastProcessedBlock(networkKey string, blockNum *big.Int)
 			"block":   blockNum.String(),
 		}).Error("Failed to persist last processed block")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Price oracle — fetches USD prices from four public APIs and returns a
+// consensus value (median, rounded to 2 decimal places).
+// ---------------------------------------------------------------------------
+
+type priceOracle struct {
+	client *http.Client
+}
+
+func newPriceOracle() *priceOracle {
+	return &priceOracle{client: &http.Client{Timeout: 5 * time.Second}}
+}
+
+var coinGeckoIDs = map[string]string{
+	"USDC": "usd-coin",
+	"WETH": "weth",
+	"ETH":  "ethereum",
+	"ZEN":  "zencash",
+}
+
+var coinCapIDs = map[string]string{
+	"USDC": "usd-coin",
+	"WETH": "ethereum",
+	"ETH":  "ethereum",
+	"ZEN":  "zencash",
+}
+
+var cryptoCompareSymbols = map[string]string{
+	"USDC": "USDC",
+	"WETH": "ETH",
+	"ETH":  "ETH",
+	"ZEN":  "ZEN",
+}
+
+// binancePairs omits ZEN — no USDT pair exists on Binance.
+var binancePairs = map[string]string{
+	"USDC": "USDCUSDT",
+	"WETH": "ETHUSDT",
+	"ETH":  "ETHUSDT",
+}
+
+// FetchConsensusPrice queries up to four APIs in parallel and returns the median
+// USD price rounded to two decimal places. Requires at least two sources to agree.
+func (o *priceOracle) FetchConsensusPrice(symbol string) (float64, error) {
+	upper := strings.ToUpper(symbol)
+
+	type result struct {
+		source string
+		price  float64
+		err    error
+	}
+
+	fetchers := []struct {
+		name string
+		fn   func(string) (float64, error)
+	}{
+		{"coingecko", o.fetchCoinGecko},
+		{"coincap", o.fetchCoinCap},
+		{"cryptocompare", o.fetchCryptoCompare},
+		{"binance", o.fetchBinance},
+	}
+
+	ch := make(chan result, len(fetchers))
+	for _, f := range fetchers {
+		go func(name string, fn func(string) (float64, error)) {
+			price, err := fn(upper)
+			ch <- result{name, price, err}
+		}(f.name, f.fn)
+	}
+
+	var prices []float64
+	for range fetchers {
+		r := <-ch
+		if r.err != nil {
+			log.WithFields(log.Fields{"source": r.source, "symbol": upper, "error": r.err}).Debug("Price source unavailable")
+			continue
+		}
+		if r.price > 0 {
+			log.WithFields(log.Fields{"source": r.source, "symbol": upper, "price": r.price}).Debug("Fetched price from source")
+			prices = append(prices, r.price)
+		}
+	}
+
+	if len(prices) < 2 {
+		return 0, fmt.Errorf("insufficient price data for %s: only %d source(s) responded", symbol, len(prices))
+	}
+
+	sorted := make([]float64, len(prices))
+	copy(sorted, prices)
+	sort.Float64s(sorted)
+	n := len(sorted)
+	var median float64
+	if n%2 == 0 {
+		median = (sorted[n/2-1] + sorted[n/2]) / 2
+	} else {
+		median = sorted[n/2]
+	}
+	consensus := math.Round(median*100) / 100
+
+	log.WithFields(log.Fields{"symbol": upper, "sources": len(prices), "consensus": consensus}).Info("Computed consensus price")
+	return consensus, nil
+}
+
+func (o *priceOracle) fetchCoinGecko(symbol string) (float64, error) {
+	id, ok := coinGeckoIDs[symbol]
+	if !ok {
+		return 0, fmt.Errorf("no CoinGecko ID for symbol %s", symbol)
+	}
+	resp, err := o.client.Get(fmt.Sprintf("https://api.coingecko.com/api/v3/simple/price?ids=%s&vs_currencies=usd", id))
+	if err != nil {
+		return 0, fmt.Errorf("coingecko request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("coingecko returned status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read coingecko response: %w", err)
+	}
+	var data map[string]map[string]float64
+	if err := json.Unmarshal(body, &data); err != nil {
+		return 0, fmt.Errorf("failed to parse coingecko response: %w", err)
+	}
+	tokenData, ok := data[id]
+	if !ok {
+		return 0, fmt.Errorf("token %s not found in coingecko response", id)
+	}
+	price, ok := tokenData["usd"]
+	if !ok {
+		return 0, fmt.Errorf("USD price not found for %s in coingecko response", id)
+	}
+	return price, nil
+}
+
+func (o *priceOracle) fetchCoinCap(symbol string) (float64, error) {
+	id, ok := coinCapIDs[symbol]
+	if !ok {
+		return 0, fmt.Errorf("no CoinCap ID for symbol %s", symbol)
+	}
+	resp, err := o.client.Get(fmt.Sprintf("https://api.coincap.io/v2/assets/%s", id))
+	if err != nil {
+		return 0, fmt.Errorf("coincap request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("coincap returned status %d", resp.StatusCode)
+	}
+	var data struct {
+		Data struct {
+			PriceUsd string `json:"priceUsd"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return 0, fmt.Errorf("failed to parse coincap response: %w", err)
+	}
+	price, err := strconv.ParseFloat(data.Data.PriceUsd, 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse coincap price %q: %w", data.Data.PriceUsd, err)
+	}
+	return price, nil
+}
+
+func (o *priceOracle) fetchCryptoCompare(symbol string) (float64, error) {
+	fsym, ok := cryptoCompareSymbols[symbol]
+	if !ok {
+		return 0, fmt.Errorf("no CryptoCompare symbol for %s", symbol)
+	}
+	resp, err := o.client.Get(fmt.Sprintf("https://min-api.cryptocompare.com/data/price?fsym=%s&tsyms=USD", fsym))
+	if err != nil {
+		return 0, fmt.Errorf("cryptocompare request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("cryptocompare returned status %d", resp.StatusCode)
+	}
+	var data map[string]float64
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return 0, fmt.Errorf("failed to parse cryptocompare response: %w", err)
+	}
+	price, ok := data["USD"]
+	if !ok {
+		return 0, fmt.Errorf("USD price not found in cryptocompare response for %s", fsym)
+	}
+	return price, nil
+}
+
+func (o *priceOracle) fetchBinance(symbol string) (float64, error) {
+	pair, ok := binancePairs[symbol]
+	if !ok {
+		return 0, fmt.Errorf("no Binance pair for symbol %s", symbol)
+	}
+	resp, err := o.client.Get(fmt.Sprintf("https://api.binance.com/api/v3/ticker/price?symbol=%s", pair))
+	if err != nil {
+		return 0, fmt.Errorf("binance request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("binance returned status %d", resp.StatusCode)
+	}
+	var data struct {
+		Price string `json:"price"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return 0, fmt.Errorf("failed to parse binance response: %w", err)
+	}
+	price, err := strconv.ParseFloat(data.Price, 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse binance price %q: %w", data.Price, err)
+	}
+	return price, nil
 }

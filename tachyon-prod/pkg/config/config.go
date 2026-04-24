@@ -1,14 +1,17 @@
 package config
 
 import (
+	"crypto/ecdsa"
 	"encoding/hex"
 	"fmt"
 	"math/big"
 	"os"
 	"strconv"
+	"strings"
 
 	ecies "github.com/ecies/go/v2"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/joho/godotenv"
 	"github.com/zk-tachyon/tachyon-prod/pkg/types"
 )
@@ -24,6 +27,11 @@ type Config struct {
 
 	// Wallet configuration
 	PrivateKey string
+
+	// SafeSignerKeys are the 3 TEE private keys that co-sign every Safe transaction.
+	// All keys sign each tx; signatures are sorted by address before submission.
+	// Set via SAFE_SIGNER_KEY_1, SAFE_SIGNER_KEY_2, SAFE_SIGNER_KEY_3.
+	SafeSignerKeys []*ecdsa.PrivateKey
 
 	// ECIES keypair for encrypting recipient information
 	ECIESPrivateKey *ecies.PrivateKey
@@ -72,12 +80,18 @@ func LoadConfig() (*Config, error) {
 			return nil, fmt.Errorf("missing %sRPC", prefix)
 		}
 
+		safeAddr := getEnv(prefix+"SAFE_ADDRESS", "")
+		if safeAddr != "" && !common.IsHexAddress(safeAddr) {
+			return nil, fmt.Errorf("invalid %sSAFE_ADDRESS: %s", prefix, safeAddr)
+		}
+
 		chainConfig := types.NetworkConfig{
 			Name:          getEnv(prefix+"NAME", fmt.Sprintf("chain-%s", chainIDStr)),
 			RpcURL:        rpcURL,
 			ChainID:       chainID,
 			BridgeAddress: bridgeAddr,
 			Explorer:      getEnv(prefix+"EXPLORER", ""),
+			SafeAddress:   safeAddr,
 		}
 
 		// Use chain ID as the map key
@@ -116,6 +130,20 @@ func LoadConfig() (*Config, error) {
 	cfg.PrivateKey = os.Getenv("PRIVATE_KEY")
 	if cfg.PrivateKey == "" {
 		return nil, fmt.Errorf("PRIVATE_KEY environment variable is required")
+	}
+
+	// Load TEE Safe signing keys (optional — only needed when a chain has SAFE_ADDRESS set)
+	for i := 1; i <= 3; i++ {
+		envKey := fmt.Sprintf("SAFE_SIGNER_KEY_%d", i)
+		hexKey := strings.TrimPrefix(os.Getenv(envKey), "0x")
+		if hexKey == "" {
+			continue
+		}
+		privKey, err := crypto.HexToECDSA(hexKey)
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s: %w", envKey, err)
+		}
+		cfg.SafeSignerKeys = append(cfg.SafeSignerKeys, privKey)
 	}
 
 	// Load service configuration
