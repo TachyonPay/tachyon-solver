@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	bridgeIntentABI = `[{"inputs":[{"internalType":"uint256","name":"_chainId","type":"uint256"}],"stateMutability":"nonpayable","type":"constructor"},{"inputs":[{"internalType":"address","name":"owner","type":"address"}],"name":"OwnableInvalidOwner","type":"error"},{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"OwnableUnauthorizedAccount","type":"error"},{"inputs":[],"name":"ReentrancyGuardReentrantCall","type":"error"},{"inputs":[{"internalType":"address","name":"token","type":"address"}],"name":"SafeERC20FailedOperation","type":"error"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"uint256","name":"intentId","type":"uint256"},{"indexed":true,"internalType":"address","name":"solver","type":"address"},{"indexed":false,"internalType":"uint256","name":"bidAmount","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"timestamp","type":"uint256"}],"name":"BidPlaced","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"uint256","name":"intentId","type":"uint256"},{"indexed":false,"internalType":"address[]","name":"recipients","type":"address[]"},{"indexed":false,"internalType":"uint256[]","name":"amounts","type":"uint256[]"}],"name":"FundsDistributed","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"uint256","name":"intentId","type":"uint256"},{"indexed":true,"internalType":"address","name":"solver","type":"address"}],"name":"IntentCompleted","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"uint256","name":"intentId","type":"uint256"},{"indexed":true,"internalType":"address","name":"user","type":"address"},{"indexed":false,"internalType":"address","name":"tokenA","type":"address"},{"indexed":false,"internalType":"address","name":"tokenB","type":"address"},{"indexed":false,"internalType":"uint256","name":"amountA","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"expectedAmountB","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"reward","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"destChainId","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"endTime","type":"uint256"}],"name":"IntentCreated","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"uint256","name":"intentId","type":"uint256"},{"indexed":true,"internalType":"address","name":"solver","type":"address"},{"indexed":false,"internalType":"uint256","name":"amountA","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"reward","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"winningBid","type":"uint256"}],"name":"IntentSettled","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"uint256","name":"intentId","type":"uint256"},{"indexed":true,"internalType":"address","name":"solver","type":"address"},{"indexed":false,"internalType":"address","name":"tokenB","type":"address"},{"indexed":false,"internalType":"uint256","name":"amountB","type":"uint256"}],"name":"IntentSolvedOnChain2","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"uint256","name":"intentId","type":"uint256"},{"indexed":true,"internalType":"address","name":"winningSolver","type":"address"},{"indexed":false,"internalType":"uint256","name":"winningBid","type":"uint256"}],"name":"IntentWon","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"previousOwner","type":"address"},{"indexed":true,"internalType":"address","name":"newOwner","type":"address"}],"name":"OwnershipTransferred","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"uint256","name":"intentId","type":"uint256"},{"indexed":true,"internalType":"address","name":"solver","type":"address"},{"indexed":false,"internalType":"uint256","name":"amount","type":"uint256"}],"name":"SolverDeposited","type":"event"},{"inputs":[],"name":"MAX_AUCTION_DURATION","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"MIN_AUCTION_DURATION","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"","type":"address"}],"name":"authorizedRelayers","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"chainId","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"_tokenA","type":"address"},{"internalType":"address","name":"_tokenB","type":"address"},{"internalType":"uint256","name":"_amountA","type":"uint256"},{"internalType":"uint256","name":"_expectedAmountB","type":"uint256"},{"internalType":"uint256","name":"_reward","type":"uint256"},{"internalType":"uint256","name":"_destChainId","type":"uint256"},{"internalType":"uint256","name":"_auctionDuration","type":"uint256"}],"name":"createIntent","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"_intentId","type":"uint256"}],"name":"depositAndPickup","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"_intentId","type":"uint256"}],"name":"finalizeAuction","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"getLatestIntentId","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"_intentId","type":"uint256"}],"name":"getIntent","outputs":[{"components":[{"internalType":"uint256","name":"intentId","type":"uint256"},{"internalType":"address","name":"user","type":"address"},{"internalType":"address","name":"tokenA","type":"address"},{"internalType":"address","name":"tokenB","type":"address"},{"internalType":"uint256","name":"amountA","type":"uint256"},{"internalType":"uint256","name":"expectedAmountB","type":"uint256"},{"internalType":"uint256","name":"reward","type":"uint256"},{"internalType":"uint256","name":"destChainId","type":"uint256"},{"internalType":"uint256","name":"endTime","type":"uint256"},{"internalType":"address","name":"winningSolver","type":"address"},{"internalType":"uint256","name":"winningBid","type":"uint256"},{"internalType":"bool","name":"completed","type":"bool"},{"internalType":"bool","name":"deposited","type":"bool"}],"internalType":"struct BridgeIntent.Intent","name":"","type":"tuple"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"_intentId","type":"uint256"},{"internalType":"uint256","name":"_bidAmount","type":"uint256"}],"name":"placeBid","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"_intentId","type":"uint256"},{"internalType":"address","name":"_user","type":"address"},{"internalType":"address","name":"_tokenB","type":"address"},{"internalType":"uint256","name":"_expectedAmountB","type":"uint256"},{"internalType":"address[]","name":"_recipients","type":"address[]"},{"internalType":"uint256[]","name":"_amounts","type":"uint256[]"}],"name":"solveIntentOnChain2","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"_intentId","type":"uint256"}],"name":"isIntentSolvedOnChain2","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"_intentId","type":"uint256"},{"internalType":"uint256","name":"_chain2IntentId","type":"uint256"}],"name":"settleIntentWithChain2Verification","outputs":[],"stateMutability":"nonpayable","type":"function"}]`
+	bridgeIntentABI = `[{"inputs":[{"internalType":"uint256","name":"_chainId","type":"uint256"}],"stateMutability":"nonpayable","type":"constructor"},{"inputs":[{"internalType":"address","name":"owner","type":"address"}],"name":"OwnableInvalidOwner","type":"error"},{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"OwnableUnauthorizedAccount","type":"error"},{"inputs":[],"name":"ReentrancyGuardReentrantCall","type":"error"},{"inputs":[{"internalType":"address","name":"token","type":"address"}],"name":"SafeERC20FailedOperation","type":"error"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"uint256","name":"intentId","type":"uint256"},{"indexed":true,"internalType":"address","name":"solver","type":"address"},{"indexed":false,"internalType":"uint256","name":"bidAmount","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"timestamp","type":"uint256"}],"name":"BidPlaced","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"uint256","name":"intentId","type":"uint256"},{"indexed":false,"internalType":"address[]","name":"recipients","type":"address[]"},{"indexed":false,"internalType":"uint256[]","name":"amounts","type":"uint256[]"}],"name":"FundsDistributed","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"uint256","name":"intentId","type":"uint256"},{"indexed":true,"internalType":"address","name":"solver","type":"address"}],"name":"IntentCompleted","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"uint256","name":"intentId","type":"uint256"},{"indexed":true,"internalType":"address","name":"user","type":"address"},{"indexed":false,"internalType":"address","name":"tokenA","type":"address"},{"indexed":false,"internalType":"address","name":"tokenB","type":"address"},{"indexed":false,"internalType":"uint256","name":"amountA","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"expectedAmountB","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"reward","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"destChainId","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"endTime","type":"uint256"}],"name":"IntentCreated","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"uint256","name":"intentId","type":"uint256"},{"indexed":true,"internalType":"address","name":"solver","type":"address"},{"indexed":false,"internalType":"uint256","name":"amountA","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"reward","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"winningBid","type":"uint256"}],"name":"IntentSettled","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"uint256","name":"intentId","type":"uint256"},{"indexed":true,"internalType":"address","name":"solver","type":"address"},{"indexed":false,"internalType":"address","name":"tokenB","type":"address"},{"indexed":false,"internalType":"uint256","name":"amountB","type":"uint256"}],"name":"IntentSolvedOnChain2","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"uint256","name":"intentId","type":"uint256"},{"indexed":true,"internalType":"address","name":"winningSolver","type":"address"},{"indexed":false,"internalType":"uint256","name":"winningBid","type":"uint256"}],"name":"IntentWon","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"previousOwner","type":"address"},{"indexed":true,"internalType":"address","name":"newOwner","type":"address"}],"name":"OwnershipTransferred","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"uint256","name":"intentId","type":"uint256"},{"indexed":true,"internalType":"address","name":"solver","type":"address"},{"indexed":false,"internalType":"uint256","name":"amount","type":"uint256"}],"name":"SolverDeposited","type":"event"},{"inputs":[],"name":"MAX_AUCTION_DURATION","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"MIN_AUCTION_DURATION","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"","type":"address"}],"name":"authorizedRelayers","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"chainId","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"_tokenA","type":"address"},{"internalType":"address","name":"_tokenB","type":"address"},{"internalType":"uint256","name":"_amountA","type":"uint256"},{"internalType":"uint256","name":"_expectedAmountB","type":"uint256"},{"internalType":"uint256","name":"_reward","type":"uint256"},{"internalType":"uint256","name":"_destChainId","type":"uint256"},{"internalType":"uint256","name":"_auctionDuration","type":"uint256"}],"name":"createIntent","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"_intentId","type":"uint256"}],"name":"depositAndPickup","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"_intentId","type":"uint256"}],"name":"finalizeAuction","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"getLatestIntentId","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"_intentId","type":"uint256"}],"name":"getIntent","outputs":[{"components":[{"internalType":"uint256","name":"intentId","type":"uint256"},{"internalType":"address","name":"user","type":"address"},{"internalType":"address","name":"tokenA","type":"address"},{"internalType":"address","name":"tokenB","type":"address"},{"internalType":"uint256","name":"amountA","type":"uint256"},{"internalType":"uint256","name":"expectedAmountB","type":"uint256"},{"internalType":"uint256","name":"reward","type":"uint256"},{"internalType":"uint256","name":"destChainId","type":"uint256"},{"internalType":"uint256","name":"endTime","type":"uint256"},{"internalType":"address","name":"winningSolver","type":"address"},{"internalType":"uint256","name":"winningBid","type":"uint256"},{"internalType":"bool","name":"completed","type":"bool"},{"internalType":"bool","name":"deposited","type":"bool"}],"internalType":"struct BridgeIntent.Intent","name":"","type":"tuple"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"_intentId","type":"uint256"},{"internalType":"uint256","name":"_bidAmount","type":"uint256"}],"name":"placeBid","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"_sourceChainId","type":"uint256"},{"internalType":"uint256","name":"_intentId","type":"uint256"},{"internalType":"address","name":"_user","type":"address"},{"internalType":"address","name":"_tokenB","type":"address"},{"internalType":"uint256","name":"_expectedAmountB","type":"uint256"},{"internalType":"address[]","name":"_recipients","type":"address[]"},{"internalType":"uint256[]","name":"_amounts","type":"uint256[]"}],"name":"solveIntentOnChain2","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"_sourceChainId","type":"uint256"},{"internalType":"uint256","name":"_intentId","type":"uint256"}],"name":"isIntentSolvedOnChain2","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"_intentId","type":"uint256"},{"internalType":"uint256","name":"_chain2IntentId","type":"uint256"}],"name":"settleIntentWithChain2Verification","outputs":[],"stateMutability":"nonpayable","type":"function"}]`
 
 	mockERC20ABI = `[{"inputs":[{"internalType":"string","name":"name","type":"string"},{"internalType":"string","name":"symbol","type":"string"},{"internalType":"uint8","name":"decimals_","type":"uint8"},{"internalType":"uint256","name":"initialSupply","type":"uint256"}],"stateMutability":"nonpayable","type":"constructor"},{"inputs":[{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"approve","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"owner","type":"address"},{"internalType":"address","name":"spender","type":"address"}],"name":"allowance","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]`
 )
@@ -40,19 +40,24 @@ type TestConfig struct {
 	PrivateKey        string
 	RelayerURL        string
 	AuctionDuration   int64
+	AmountA           string // amount of TokenA user deposits (raw number, e.g. "100")
+	AmountB           string // amount of TokenB user expects back (e.g. "95")
+	Reward            string // solver incentive in TokenA (e.g. "5")
+	Recipient1Amount  string // TokenB amount for recipient 1 (must sum to AmountB)
+	Recipient2Amount  string // TokenB amount for recipient 2
+	Recipient3Amount  string // TokenB amount for recipient 3
 }
 
 type IntentTest struct {
-	TestNum       int
-	SourceChain   string
-	DestChain     string
-	TokenA        string
-	TokenB        string
-	TokenDecimals int // Decimals for both tokenA and tokenB (should match for cross-chain swaps)
-	SourceClient  *ethclient.Client
-	DestClient    *ethclient.Client
-	SourceBridge  *bind.BoundContract
-	DestBridge    *bind.BoundContract
+	TestNum      int
+	SourceChain  string
+	DestChain    string
+	TokenA       string
+	TokenB       string
+	SourceClient *ethclient.Client
+	DestClient   *ethclient.Client
+	SourceBridge *bind.BoundContract
+	DestBridge   *bind.BoundContract
 	SourceChainID *big.Int
 	DestChainID   *big.Int
 }
@@ -71,6 +76,12 @@ func loadConfig() (*TestConfig, error) {
 		PrivateKey:        os.Getenv("PRIVATE_KEY"),
 		RelayerURL:        getEnvOrDefault("RELAYER_URL", "http://65.0.45.215:3000"),
 		AuctionDuration:   100,
+		AmountA:           getEnvOrDefault("TEST_AMOUNT_A", "100"),
+		AmountB:           getEnvOrDefault("TEST_AMOUNT_B", "95"),
+		Reward:            getEnvOrDefault("TEST_REWARD", "5"),
+		Recipient1Amount:  getEnvOrDefault("TEST_RECIPIENT_1_AMOUNT", "30"),
+		Recipient2Amount:  getEnvOrDefault("TEST_RECIPIENT_2_AMOUNT", "35"),
+		Recipient3Amount:  getEnvOrDefault("TEST_RECIPIENT_3_AMOUNT", "30"),
 	}
 	fmt.Printf(">>> RelayerURL = %s\n", cfg.RelayerURL)
 	return cfg, nil
@@ -148,14 +159,14 @@ func main() {
 	tests := []IntentTest{
 		{
 			TestNum: 1, SourceChain: "horizen", DestChain: "base",
-			TokenA: tokenWETH_Horizen, TokenB: tokenWETH_Base, TokenDecimals: 18,
+			TokenA: tokenWETH_Horizen, TokenB: tokenWETH_Base,
 			SourceClient: horizenClient, DestClient: baseClient,
 			SourceBridge: bridgeHorizen, DestBridge: bridgeBase,
 			SourceChainID: horizenChainID, DestChainID: baseChainID,
 		},
 		{
 			TestNum: 2, SourceChain: "base", DestChain: "horizen",
-			TokenA: tokenUSDC_Base, TokenB: tokenUSDC_Horizen, TokenDecimals: 6,
+			TokenA: tokenUSDC_Base, TokenB: tokenUSDC_Horizen,
 			SourceClient: baseClient, DestClient: horizenClient,
 			SourceBridge: bridgeBase, DestBridge: bridgeHorizen,
 			SourceChainID: baseChainID, DestChainID: horizenChainID,
@@ -230,8 +241,8 @@ func main() {
 			fmt.Println("   Source Chain: ❌ Not Completed")
 		}
 
-		// Check destination chain status
-		destSolved := checkIntentSolved(ctx, intent.DestBridge, intent.IntentID)
+		// Check destination chain status (pass source chain ID for composite key lookup)
+		destSolved := checkIntentSolved(ctx, intent.DestBridge, tests[i].SourceChainID, intent.IntentID)
 		if destSolved {
 			fmt.Println("   Destination Chain: ✅ Solved")
 		} else {
@@ -425,10 +436,14 @@ func createIntent(ctx context.Context, cfg *TestConfig, wallet *utils.TestWallet
 	fmt.Printf("🧪 TEST %d: %s → %s\n", test.TestNum, test.SourceChain, test.DestChain)
 	fmt.Printf("%s\n", strings.Repeat("=", 80))
 
-	// Use correct decimals for each token type
-	expectedAmountB := utils.ParseToken("95", test.TokenDecimals)
-	reward := utils.ParseToken("5", test.TokenDecimals)
+	decimalsA := fetchTokenDecimals(ctx, test.SourceClient, test.TokenA)
+	decimalsB := fetchTokenDecimals(ctx, test.DestClient, test.TokenB)
+	amountA := utils.ParseToken(cfg.AmountA, decimalsA)
+	expectedAmountB := utils.ParseToken(cfg.AmountB, decimalsB)
+	reward := utils.ParseToken(cfg.Reward, decimalsA)
 	auctionDuration := big.NewInt(cfg.AuctionDuration)
+
+	fmt.Printf("💱 TokenA decimals: %d, TokenB decimals: %d\n", decimalsA, decimalsB)
 
 	// Get current latest intent ID on source chain
 	var latestIDResult []interface{}
@@ -441,9 +456,9 @@ func createIntent(ctx context.Context, cfg *TestConfig, wallet *utils.TestWallet
 	fmt.Printf("🎯 Current Latest Intent ID on %s: %s\n", test.SourceChain, currentLatestID)
 	fmt.Printf("🎯 Target Intent ID: %s\n", targetIntentID)
 
-	// Approve tokens
+	// Approve tokens — user deposits amountA + reward of TokenA
 	tokenAContract := bind.NewBoundContract(common.HexToAddress(test.TokenA), erc20ABI, test.SourceClient, test.SourceClient, test.SourceClient)
-	approveAmount := new(big.Int).Add(expectedAmountB, reward)
+	approveAmount := new(big.Int).Add(amountA, reward)
 
 	auth, err := utils.GetTransactOpts(ctx, test.SourceClient, wallet, test.SourceChainID)
 	if err != nil {
@@ -463,7 +478,7 @@ func createIntent(ctx context.Context, cfg *TestConfig, wallet *utils.TestWallet
 	auth2, _ := utils.GetTransactOpts(ctx, test.SourceClient, wallet, test.SourceChainID)
 	createIntentTx, err := test.SourceBridge.Transact(auth2, "createIntent",
 		common.HexToAddress(test.TokenA), common.HexToAddress(test.TokenB),
-		expectedAmountB, expectedAmountB, reward, test.DestChainID, auctionDuration)
+		amountA, expectedAmountB, reward, test.DestChainID, auctionDuration)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create intent: %w", err)
 	}
@@ -600,9 +615,9 @@ func createIntent(ctx context.Context, cfg *TestConfig, wallet *utils.TestWallet
 	// Use predicted Safe addresses as recipients — tokens land at the Safe controlled by the stealth EOA
 	recipients := safeAddrs
 	amounts := []string{
-		utils.ParseToken("30", test.TokenDecimals).String(),
-		utils.ParseToken("35", test.TokenDecimals).String(),
-		utils.ParseToken("30", test.TokenDecimals).String(),
+		utils.ParseToken(cfg.Recipient1Amount, decimalsB).String(),
+		utils.ParseToken(cfg.Recipient2Amount, decimalsB).String(),
+		utils.ParseToken(cfg.Recipient3Amount, decimalsB).String(),
 	}
 
 	// Store recipients (stealth addresses) in relayer with SOURCE chain ID
@@ -668,9 +683,9 @@ func checkIntentCompleted(ctx context.Context, bridge *bind.BoundContract, inten
 	return intentStruct.Completed
 }
 
-func checkIntentSolved(ctx context.Context, bridge *bind.BoundContract, intentID *big.Int) bool {
+func checkIntentSolved(ctx context.Context, bridge *bind.BoundContract, sourceChainID *big.Int, intentID *big.Int) bool {
 	var result []interface{}
-	err := bridge.Call(&bind.CallOpts{Context: ctx}, &result, "isIntentSolvedOnChain2", intentID)
+	err := bridge.Call(&bind.CallOpts{Context: ctx}, &result, "isIntentSolvedOnChain2", sourceChainID, intentID)
 	if err != nil || len(result) == 0 {
 		return false
 	}
@@ -683,6 +698,16 @@ func mustGetBlockNumber(ctx context.Context, client *ethclient.Client) uint64 {
 		return 0
 	}
 	return block
+}
+
+func fetchTokenDecimals(ctx context.Context, client *ethclient.Client, tokenAddr string) int {
+	decimalsABI, _ := abi.JSON(strings.NewReader(`[{"constant":true,"inputs":[],"name":"decimals","outputs":[{"name":"","type":"uint8"}],"type":"function"}]`))
+	contract := bind.NewBoundContract(common.HexToAddress(tokenAddr), decimalsABI, client, client, client)
+	var out []interface{}
+	if err := contract.Call(&bind.CallOpts{Context: ctx}, &out, "decimals"); err != nil || len(out) == 0 {
+		return 18
+	}
+	return int(out[0].(uint8))
 }
 
 // fetchECIESPublicKey retrieves the ECIES public key from the relayer

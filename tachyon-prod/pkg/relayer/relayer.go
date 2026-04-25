@@ -50,6 +50,8 @@ func NewRelayer(cfg *config.Config) (*Relayer, error) {
 			cfg.PrivateKey,
 			chainCfg.ChainID,
 			chainCfg.Name,
+			"",  // relayer uses its own key directly, no Safe
+			nil, // no Safe signing keys needed for relayer
 		)
 		if err != nil {
 			store.Close()

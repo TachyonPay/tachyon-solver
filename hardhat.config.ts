@@ -23,7 +23,7 @@ const config: HardhatUserConfig = {
     horizen_testnet: {
       url: process.env.HORIZEN_TESTNET_RPC_URL || "https://horizen-rpc-testnet.appchain.base.org",
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
-      chainId: 845320009,
+      chainId: 2651420,
       gasPrice: "auto",
     },
     base_sepolia: {

@@ -42,16 +42,15 @@ type TestConfig struct {
 }
 
 type IntentTest struct {
-	TestNum       int
-	SourceChain   string
-	DestChain     string
-	TokenA        string
-	TokenB        string
-	TokenDecimals int
-	SourceClient  *ethclient.Client
-	DestClient    *ethclient.Client
-	SourceBridge  *bind.BoundContract
-	DestBridge    *bind.BoundContract
+	TestNum      int
+	SourceChain  string
+	DestChain    string
+	TokenA       string
+	TokenB       string
+	SourceClient *ethclient.Client
+	DestClient   *ethclient.Client
+	SourceBridge *bind.BoundContract
+	DestBridge   *bind.BoundContract
 	SourceChainID *big.Int
 	DestChainID   *big.Int
 }
@@ -166,14 +165,14 @@ func main() {
 	tests := []IntentTest{
 		{
 			TestNum: 1, SourceChain: "horizen", DestChain: "rari",
-			TokenA: tokenWETH_Horizen, TokenB: tokenWETH_Rari, TokenDecimals: 18,
+			TokenA: tokenWETH_Horizen, TokenB: tokenWETH_Rari,
 			SourceClient: horizenClient, DestClient: rariClient,
 			SourceBridge: bridgeHorizen, DestBridge: bridgeRari,
 			SourceChainID: horizenChainID, DestChainID: rariChainID,
 		},
 		{
 			TestNum: 2, SourceChain: "base", DestChain: "rari",
-			TokenA: tokenUSDC_Base, TokenB: tokenUSDC_Rari, TokenDecimals: 6,
+			TokenA: tokenUSDC_Base, TokenB: tokenUSDC_Rari,
 			SourceClient: baseClient, DestClient: rariClient,
 			SourceBridge: bridgeBase, DestBridge: bridgeRari,
 			SourceChainID: baseChainID, DestChainID: rariChainID,
@@ -265,8 +264,9 @@ func createIntent(ctx context.Context, cfg *TestConfig, wallet *utils.TestWallet
 	fmt.Printf("🧪 TEST %d: %s → %s\n", test.TestNum, test.SourceChain, test.DestChain)
 	fmt.Printf("%s\n", strings.Repeat("=", 80))
 
-	expectedAmountB := utils.ParseToken("95", test.TokenDecimals)
-	reward := utils.ParseToken("5", test.TokenDecimals)
+	decimals := fetchTokenDecimals(ctx, test.SourceClient, test.TokenA)
+	expectedAmountB := utils.ParseToken("95", decimals)
+	reward := utils.ParseToken("5", decimals)
 	auctionDuration := big.NewInt(cfg.AuctionDuration)
 
 	// Get current latest intent ID
@@ -345,9 +345,9 @@ func createIntent(ctx context.Context, cfg *TestConfig, wallet *utils.TestWallet
 		utils.GenerateRandomAddress().Hex(),
 	}
 	amounts := []string{
-		utils.ParseToken("30", test.TokenDecimals).String(),
-		utils.ParseToken("35", test.TokenDecimals).String(),
-		utils.ParseToken("30", test.TokenDecimals).String(),
+		utils.ParseToken("30", decimals).String(),
+		utils.ParseToken("35", decimals).String(),
+		utils.ParseToken("30", decimals).String(),
 	}
 
 	// Store recipients
@@ -427,6 +427,16 @@ func mustGetBlockNumber(ctx context.Context, client *ethclient.Client) uint64 {
 		return 0
 	}
 	return block
+}
+
+func fetchTokenDecimals(ctx context.Context, client *ethclient.Client, tokenAddr string) int {
+	decimalsABI, _ := abi.JSON(strings.NewReader(`[{"constant":true,"inputs":[],"name":"decimals","outputs":[{"name":"","type":"uint8"}],"type":"function"}]`))
+	contract := bind.NewBoundContract(common.HexToAddress(tokenAddr), decimalsABI, client, client, client)
+	var out []interface{}
+	if err := contract.Call(&bind.CallOpts{Context: ctx}, &out, "decimals"); err != nil || len(out) == 0 {
+		return 18
+	}
+	return int(out[0].(uint8))
 }
 
 func fetchECIESPublicKey(relayerURL string) (*ecies.PublicKey, error) {
