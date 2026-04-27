@@ -2,9 +2,11 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/zk-tachyon/tachyon-prod/pkg/middleware"
 	"github.com/zk-tachyon/tachyon-prod/pkg/solver"
 	"github.com/zk-tachyon/tachyon-prod/pkg/types"
 )
@@ -27,6 +29,9 @@ func (api *SolverAPI) RegisterRoutes(r *gin.Engine) {
 	r.GET("/active-intents", api.GetActiveIntents)
 	r.GET("/intent-status/:intentId", api.GetIntentStatus)
 	r.GET("/intent-status/:intentId/:network", api.GetIntentStatusByNetwork)
+
+	// User transaction history — wallet signature required
+	r.GET("/transactions", middleware.WalletSignatureAuth(), api.GetTransactions)
 }
 
 // RegisterAdminRoutes registers admin-only routes (call with auth middleware group)
@@ -149,5 +154,47 @@ func (api *SolverAPI) StopSolver(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Solver stopped successfully",
+	})
+}
+
+// GetTransactions returns paginated transaction history for the authenticated user.
+// Query params: page (default 1), limit (default 20, max 100), status ("pending"|"completed"|"")
+func (api *SolverAPI) GetTransactions(c *gin.Context) {
+	user := c.Query("user")
+	status := c.Query("status")
+
+	page, err := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if err != nil || page < 1 {
+		page = 1
+	}
+	limit, err := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if err != nil || limit < 1 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	records, total, err := api.solver.GetTransactionsByUser(user, status, page, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, types.TransactionPageResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	totalPages := 1
+	if total > 0 {
+		totalPages = (total + limit - 1) / limit
+	}
+
+	c.JSON(http.StatusOK, types.TransactionPageResponse{
+		Success:      true,
+		Transactions: records,
+		Page:         page,
+		Limit:        limit,
+		Total:        total,
+		TotalPages:   totalPages,
 	})
 }

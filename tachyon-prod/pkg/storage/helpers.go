@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -282,6 +284,75 @@ func (s *Store) GetRecipientByStealthAddress(stealthAddress string) (string, err
 		return "", nil
 	}
 	return string(data), nil
+}
+
+// Transaction History Storage
+
+// SaveTransactionRecord saves or updates a transaction record keyed by intentID
+func (s *Store) SaveTransactionRecord(record *types.TransactionRecord) error {
+	key := fmt.Sprintf("%s%s", PrefixTxHistory, record.IntentID)
+	return s.PutJSON(key, record)
+}
+
+// GetTransactionRecord retrieves a transaction record by intent ID
+func (s *Store) GetTransactionRecord(intentID string) (*types.TransactionRecord, error) {
+	key := fmt.Sprintf("%s%s", PrefixTxHistory, intentID)
+	var record types.TransactionRecord
+	if err := s.GetJSON(key, &record); err != nil {
+		if err == pebble.ErrNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &record, nil
+}
+
+// GetTransactionsByUser returns paginated transaction records for a given user address.
+// status is optional — pass "" to return all statuses.
+// Returns the page of records, the total count before pagination, and any error.
+func (s *Store) GetTransactionsByUser(userAddress, status string, page, limit int) ([]*types.TransactionRecord, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 {
+		limit = 20
+	}
+
+	data, err := s.GetAllByPrefix(PrefixTxHistory)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	userLower := strings.ToLower(userAddress)
+	var all []*types.TransactionRecord
+	for _, value := range data {
+		var record types.TransactionRecord
+		if err := unmarshalJSON(value, &record); err != nil {
+			continue
+		}
+		if strings.ToLower(record.UserAddress) != userLower {
+			continue
+		}
+		if status != "" && record.Status != status {
+			continue
+		}
+		all = append(all, &record)
+	}
+
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].CreatedAt.After(all[j].CreatedAt)
+	})
+
+	total := len(all)
+	start := (page - 1) * limit
+	if start >= total {
+		return []*types.TransactionRecord{}, total, nil
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+	return all[start:end], total, nil
 }
 
 // Helper function
