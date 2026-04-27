@@ -158,9 +158,10 @@ func (api *SolverAPI) StopSolver(c *gin.Context) {
 }
 
 // GetTransactions returns paginated transaction history for the authenticated user.
+// User address is derived from the verified wallet signature — no ?user= param needed.
 // Query params: page (default 1), limit (default 20, max 100), status ("pending"|"completed"|"")
 func (api *SolverAPI) GetTransactions(c *gin.Context) {
-	user := c.Query("user")
+	user := c.GetString("verified_address")
 	status := c.Query("status")
 
 	page, err := strconv.Atoi(c.DefaultQuery("page", "1"))

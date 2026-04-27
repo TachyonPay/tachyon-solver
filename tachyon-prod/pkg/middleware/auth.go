@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -59,19 +58,19 @@ func GenerateAPIKey() string {
 	return hex.EncodeToString(b)
 }
 
-// WalletSignatureAuth verifies that the caller owns the wallet address in the ?user= query param.
-// The client must sign the message "tachyon-auth:{unix_timestamp}" with their private key and
-// pass the result in X-Signature and X-Timestamp headers. Signatures older than 5 minutes are rejected.
+// WalletSignatureAuth recovers the caller's wallet address from the request signature.
+// The client must sign "tachyon-auth:{unix_timestamp}" and pass the result in
+// X-Signature and X-Timestamp headers. The recovered address is set in the gin context
+// as "verified_address" for handlers to use. Signatures older than 30 minutes are rejected.
 func WalletSignatureAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sig := c.GetHeader("X-Signature")
 		tsStr := c.GetHeader("X-Timestamp")
-		user := c.Query("user")
 
-		if sig == "" || tsStr == "" || user == "" {
+		if sig == "" || tsStr == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"success": false,
-				"error":   "X-Signature, X-Timestamp headers and user query param are required",
+				"error":   "X-Signature and X-Timestamp headers are required",
 			})
 			return
 		}
@@ -120,16 +119,7 @@ func WalletSignatureAuth() gin.HandlerFunc {
 			return
 		}
 
-		recovered := crypto.PubkeyToAddress(*pubKey).Hex()
-		if !strings.EqualFold(recovered, user) {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"success": false,
-				"error":   "Signature does not match the provided user address",
-			})
-			return
-		}
-
-		c.Set("verified_address", recovered)
+		c.Set("verified_address", crypto.PubkeyToAddress(*pubKey).Hex())
 		c.Next()
 	}
 }
