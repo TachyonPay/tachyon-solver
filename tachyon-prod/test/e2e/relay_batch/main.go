@@ -1,25 +1,26 @@
 package main
 
-// Standalone relay-batch E2E test.
+// Standalone relay-batch E2E test — 3 Safes in one batch.
 //
 // Run with:
-//   cd tachyon-prod/test/e2e
-//   go run relay_batch_test.go
+//   cd tachyon-prod/test/e2e/relay_batch
+//   go run main.go
 //
 // What it tests:
-//   1. Register a fresh recipient with the relayer (TEE generates stealth keys)
-//   2. Generate a stealth address + predicted Safe address on Base Sepolia
-//   3. Fund the predicted Safe with a small ERC-20 amount from the test wallet
-//   4. Deploy the Safe via the relayer
-//   5. Derive the stealth private key from the TEE
-//   6. Build a Safe tx (transfer tokens back to test wallet)
-//   7. Sign the Safe tx hash with the stealth key
-//   8. Call POST /recipient/relay-batch with the signed item
-//   9. Wait for the tx and verify the token balance moved
+//   1. Register a single recipient (solver wallet) with the relayer
+//   2. For each of 3 stealth slots:
+//        a. generate-stealth  → unique stealth address
+//        b. derive-stealth-key → stealth private key
+//        c. deploy-safe        → 1-of-1 Gnosis Safe owned by that stealth key
+//        d. fund Safe          → transfer 1 token unit into the Safe
+//   3. Build one Safe tx per Safe (transfer tokens back to test wallet)
+//   4. Sign each tx hash with its stealth key
+//   5. POST /recipient/relay-batch with all 3 items → one on-chain tx via Multicall3
+//   6. Verify all 3 Safe balances moved from 1 → 0
 //
 // Prerequisites:
-//   - Relayer running and reachable at RELAYER_URL
-//   - Test wallet (PRIVATE_KEY) has some TOKEN_WETH_BASE on Base Sepolia
+//   - Relayer running at RELAYER_URL
+//   - Test wallet (PRIVATE_KEY) holds TOKEN_WETH_BASE on Base Sepolia
 //   - CHAIN_2_RPC set in .env
 
 import (
@@ -44,6 +45,21 @@ import (
 	"github.com/joho/godotenv"
 )
 
+const numSafes = 3
+
+// safeSlot holds per-Safe state accumulated across the setup steps.
+type safeSlot struct {
+	idx            int
+	stealthAddr    common.Address
+	stealthAddrStr string
+	stealthPrivKey *ecdsa.PrivateKey
+	safeAddr       common.Address
+	safeAddrStr    string
+	balBefore      *big.Int
+	transferData   []byte
+	sig            []byte
+}
+
 // ── ABIs ─────────────────────────────────────────────────────────────────────
 
 const safeABIForTest = `[
@@ -64,18 +80,17 @@ const safeABIForTest = `[
 
 const erc20ABIForTest = `[
   {"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
-  {"inputs":[{"name":"recipient","type":"address"},{"name":"amount","type":"uint256"}],"name":"transfer","outputs":[{"name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},
-  {"inputs":[],"name":"decimals","outputs":[{"name":"","type":"uint8"}],"stateMutability":"view","type":"function"}
+  {"inputs":[{"name":"recipient","type":"address"},{"name":"amount","type":"uint256"}],"name":"transfer","outputs":[{"name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"}
 ]`
 
-// ── EIP-712 (TachyonStealth domain — same as relayer) ────────────────────────
+// ── EIP-712 helpers (TachyonStealth domain) ───────────────────────────────────
 
 var (
-	rbDomainTypeHash        = crypto.Keccak256Hash([]byte("EIP712Domain(string name,string version)"))
-	rbDomainSeparator       = crypto.Keccak256Hash(rbDomainTypeHash.Bytes(), crypto.Keccak256([]byte("TachyonStealth")), crypto.Keccak256([]byte("1")))
-	rbRegisterTypeHash      = crypto.Keccak256Hash([]byte("RegisterStealth(address signer)"))
-	rbDeriveTypeHash        = crypto.Keccak256Hash([]byte("DeriveStealthKey(address recipientAddress,address stealthAddress)"))
-	rbDeploySafeTypeHash    = crypto.Keccak256Hash([]byte("DeploySafe(address stealthAddress,uint256 chainId)"))
+	rbDomainTypeHash     = crypto.Keccak256Hash([]byte("EIP712Domain(string name,string version)"))
+	rbDomainSeparator    = crypto.Keccak256Hash(rbDomainTypeHash.Bytes(), crypto.Keccak256([]byte("TachyonStealth")), crypto.Keccak256([]byte("1")))
+	rbRegisterTypeHash   = crypto.Keccak256Hash([]byte("RegisterStealth(address signer)"))
+	rbDeriveTypeHash     = crypto.Keccak256Hash([]byte("DeriveStealthKey(address recipientAddress,address stealthAddress)"))
+	rbDeploySafeTypeHash = crypto.Keccak256Hash([]byte("DeploySafe(address stealthAddress,uint256 chainId)"))
 )
 
 func rbEIP712Hash(structHash common.Hash) common.Hash {
@@ -104,7 +119,7 @@ func rbSignDeploySafe(key *ecdsa.PrivateKey, stealthAddr common.Address, chainID
 	return sig
 }
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+// ── misc helpers ──────────────────────────────────────────────────────────────
 
 func mustEnv(key string) string {
 	v := os.Getenv(key)
@@ -175,6 +190,61 @@ func waitTx(ctx context.Context, client *ethclient.Client, txHash common.Hash) e
 	return fmt.Errorf("timeout waiting for tx")
 }
 
+// waitCodeVisible polls eth_getCode until the contract is visible on the node.
+func waitCodeVisible(ctx context.Context, client *ethclient.Client, addr common.Address) {
+	fmt.Print("   ⏳ waiting for contract code on RPC...")
+	for i := 0; i < 15; i++ {
+		code, _ := client.CodeAt(ctx, addr, nil)
+		if len(code) > 0 {
+			fmt.Printf(" visible (%d bytes)\n", len(code))
+			return
+		}
+		fmt.Print(".")
+		time.Sleep(3 * time.Second)
+	}
+	fmt.Println("\n   ⚠️  code not visible after 45s — continuing")
+}
+
+// deploySafeAndGetAddr calls deploy-safe and extracts the actual deployed address
+// from the ProxyCreation event in the receipt (bypasses CREATE2 prediction mismatch).
+func deploySafeAndGetAddr(ctx context.Context, client *ethclient.Client, relayerURL string, s *safeSlot, chainID *big.Int, chainIDStr string) {
+	deploySig := rbSignDeploySafe(s.stealthPrivKey, s.stealthAddr, chainID)
+	deployBody, status, err := post(relayerURL+"/recipient/deploy-safe", map[string]string{
+		"stealthAddress": s.stealthAddrStr,
+		"signature":      hex.EncodeToString(deploySig),
+		"chainId":        chainIDStr,
+	})
+	if err != nil || status != 200 {
+		fmt.Printf("❌  [safe %d] deploy-safe: status=%d body=%s err=%v\n", s.idx+1, status, deployBody, err)
+		os.Exit(1)
+	}
+	var result map[string]interface{}
+	json.Unmarshal(deployBody, &result)
+
+	s.safeAddrStr = result["safeAddress"].(string)
+	s.safeAddr = common.HexToAddress(s.safeAddrStr)
+
+	if txHashStr, ok := result["txHash"].(string); ok && txHashStr != "" {
+		receipt, recErr := client.TransactionReceipt(ctx, common.HexToHash(txHashStr))
+		if recErr == nil && receipt != nil {
+			proxyCreationTopic := crypto.Keccak256Hash([]byte("ProxyCreation(address,address)"))
+			for _, l := range receipt.Logs {
+				if len(l.Topics) == 0 || l.Topics[0] != proxyCreationTopic {
+					continue
+				}
+				if len(l.Topics) >= 2 {
+					s.safeAddr = common.HexToAddress(l.Topics[1].Hex())
+					s.safeAddrStr = s.safeAddr.Hex()
+				} else if len(l.Data) >= 32 {
+					s.safeAddr = common.BytesToAddress(l.Data[:32])
+					s.safeAddrStr = s.safeAddr.Hex()
+				}
+				break
+			}
+		}
+	}
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 func main() {
@@ -184,9 +254,9 @@ func main() {
 	if relayerURL == "" {
 		relayerURL = "http://localhost:3000"
 	}
-	baseRPC  := mustEnv("CHAIN_2_RPC")
-	tokenAddr := common.HexToAddress(mustEnv("TOKEN_WETH_BASE"))
-	chainIDStr := mustEnv("CHAIN_2_ID") // e.g. "84532"
+	baseRPC    := mustEnv("CHAIN_2_RPC")
+	tokenAddr  := common.HexToAddress(mustEnv("TOKEN_WETH_BASE"))
+	chainIDStr := mustEnv("CHAIN_2_ID")
 
 	ctx := context.Background()
 
@@ -197,27 +267,25 @@ func main() {
 	}
 	chainID, _ := client.ChainID(ctx)
 
-	// Test wallet (pays for funding the Safe)
 	walletKey, err := crypto.HexToECDSA(strings.TrimPrefix(mustEnv("PRIVATE_KEY"), "0x"))
 	if err != nil {
 		fmt.Printf("❌  parse PRIVATE_KEY: %v\n", err)
 		os.Exit(1)
 	}
-	walletAddr := crypto.PubkeyToAddress(walletKey.PublicKey)
+	walletAddr    := crypto.PubkeyToAddress(walletKey.PublicKey)
+	recipientKey  := walletKey
+	recipientAddr := walletAddr
 
-	fmt.Println("🚀  relay-batch E2E test")
+	erc20, _          := abi.JSON(strings.NewReader(erc20ABIForTest))
+	tokenContract     := bind.NewBoundContract(tokenAddr, erc20, client, client, client)
+	ownersABI, _      := abi.JSON(strings.NewReader(`[{"inputs":[],"name":"getOwners","outputs":[{"internalType":"address[]","name":"","type":"address[]"}],"stateMutability":"view","type":"function"}]`))
+
+	fmt.Printf("🚀  relay-batch E2E test (%d Safes)\n", numSafes)
 	fmt.Printf("   relayer : %s\n", relayerURL)
 	fmt.Printf("   chain   : Base Sepolia (%s)\n", chainID)
 	fmt.Printf("   wallet  : %s\n\n", walletAddr.Hex())
 
-	// ── 1. Use solver wallet as the recipient ─────────────────────────────────
-	// The solver wallet signs the EIP-712 registration messages and acts as
-	// the recipient whose stealth address + Safe are generated by the TEE.
-	recipientKey := walletKey
-	recipientAddr := walletAddr
-	fmt.Printf("🔑  recipient EOA (solver wallet): %s\n", recipientAddr.Hex())
-
-	// ── 2. Register recipient ─────────────────────────────────────────────────
+	// ── 1. Register recipient ─────────────────────────────────────────────────
 	regSig := rbSignRegister(recipientKey, recipientAddr)
 	regBody, status, err := post(relayerURL+"/recipient/register", map[string]string{
 		"recipientAddress": recipientAddr.Hex(),
@@ -229,197 +297,148 @@ func main() {
 	}
 	fmt.Println("✅  recipient registered")
 
-	// ── 3. Generate stealth address + predicted Safe ──────────────────────────
-	genBody, status, err := post(relayerURL+"/recipient/generate-stealth", map[string]string{
-		"recipientAddress": recipientAddr.Hex(),
-		"chainId":          chainIDStr,
-		"intentId":         "relay-batch-test",
-	})
-	if err != nil || status != 200 {
-		fmt.Printf("❌  generate-stealth: status=%d body=%s err=%v\n", status, genBody, err)
-		os.Exit(1)
-	}
-	var genResult map[string]interface{}
-	json.Unmarshal(genBody, &genResult)
-	stealthAddrStr := genResult["stealthAddress"].(string)
-	stealthAddr    := common.HexToAddress(stealthAddrStr)
-	fmt.Printf("✅  stealth : %s\n\n", stealthAddrStr)
+	// ── 2. Set up each Safe slot ──────────────────────────────────────────────
+	slots := make([]safeSlot, numSafes)
 
-	erc20, _ := abi.JSON(strings.NewReader(erc20ABIForTest))
-	tokenContract := bind.NewBoundContract(tokenAddr, erc20, client, client, client)
+	for i := range slots {
+		s := &slots[i]
+		s.idx = i
+		fmt.Printf("\n─── Safe %d of %d ───────────────────────────────────────\n", i+1, numSafes)
 
-	// ── 4. Derive stealth private key from TEE ───────────────────────────────
-	// Must happen BEFORE deploy-safe (deploy-safe requires a sig from the stealth key).
-	deriveSig := rbSignDeriveStealthKey(recipientKey, recipientAddr, stealthAddr)
-	deriveBody, status, err := post(relayerURL+"/recipient/derive-stealth-key", map[string]interface{}{
-		"recipientAddress": recipientAddr.Hex(),
-		"stealthAddress":   stealthAddrStr,
-		"signature":        hex.EncodeToString(deriveSig),
-	})
-	if err != nil || status != 200 {
-		fmt.Printf("❌  derive-stealth-key: status=%d body=%s err=%v\n", status, deriveBody, err)
-		os.Exit(1)
-	}
-	var deriveResult map[string]interface{}
-	json.Unmarshal(deriveBody, &deriveResult)
-	stealthPrivKeyHex := deriveResult["stealthPrivateKey"].(string)
-	stealthPrivKey, err := crypto.HexToECDSA(strings.TrimPrefix(stealthPrivKeyHex, "0x"))
-	if err != nil {
-		fmt.Printf("❌  parse stealth key: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("✅  stealth key derived, controls: %s\n\n", crypto.PubkeyToAddress(stealthPrivKey.PublicKey).Hex())
+		// a. generate-stealth
+		genBody, status, err := post(relayerURL+"/recipient/generate-stealth", map[string]string{
+			"recipientAddress": recipientAddr.Hex(),
+			"chainId":          chainIDStr,
+			"intentId":         fmt.Sprintf("relay-batch-test-%d", i+1),
+		})
+		if err != nil || status != 200 {
+			fmt.Printf("❌  generate-stealth: status=%d body=%s err=%v\n", status, genBody, err)
+			os.Exit(1)
+		}
+		var genResult map[string]interface{}
+		json.Unmarshal(genBody, &genResult)
+		s.stealthAddrStr = genResult["stealthAddress"].(string)
+		s.stealthAddr    = common.HexToAddress(s.stealthAddrStr)
+		fmt.Printf("   stealth : %s\n", s.stealthAddrStr)
 
-	// ── 5. Deploy the Safe (signed by stealth key) ────────────────────────────
-	deploySig := rbSignDeploySafe(stealthPrivKey, stealthAddr, chainID)
-	deployBody, status, err := post(relayerURL+"/recipient/deploy-safe", map[string]string{
-		"stealthAddress": stealthAddrStr,
-		"signature":      hex.EncodeToString(deploySig),
-		"chainId":        chainIDStr,
-	})
-	if err != nil || status != 200 {
-		fmt.Printf("❌  deploy-safe: status=%d body=%s err=%v\n", status, deployBody, err)
-		os.Exit(1)
-	}
-	var deployResult map[string]interface{}
-	json.Unmarshal(deployBody, &deployResult)
+		// b. derive-stealth-key
+		deriveSig := rbSignDeriveStealthKey(recipientKey, recipientAddr, s.stealthAddr)
+		deriveBody, status, err := post(relayerURL+"/recipient/derive-stealth-key", map[string]interface{}{
+			"recipientAddress": recipientAddr.Hex(),
+			"stealthAddress":   s.stealthAddrStr,
+			"signature":        hex.EncodeToString(deriveSig),
+		})
+		if err != nil || status != 200 {
+			fmt.Printf("❌  derive-stealth-key: status=%d body=%s err=%v\n", status, deriveBody, err)
+			os.Exit(1)
+		}
+		var deriveResult map[string]interface{}
+		json.Unmarshal(deriveBody, &deriveResult)
+		privHex := deriveResult["stealthPrivateKey"].(string)
+		s.stealthPrivKey, err = crypto.HexToECDSA(strings.TrimPrefix(privHex, "0x"))
+		if err != nil {
+			fmt.Printf("❌  parse stealth key: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("   key     : controls %s\n", crypto.PubkeyToAddress(s.stealthPrivKey.PublicKey).Hex())
 
-	// Start with the predicted address from the server response.
-	safeAddrStr := deployResult["safeAddress"].(string)
-	safeAddr    := common.HexToAddress(safeAddrStr)
+		// c. deploy-safe
+		deploySafeAndGetAddr(ctx, client, relayerURL, s, chainID, chainIDStr)
+		fmt.Printf("   safe    : %s\n", s.safeAddrStr)
 
-	// If the response includes a txHash the relayer did a fresh deployment.
-	// Parse the ProxyCreation event from the receipt to get the ACTUAL deployed address;
-	// the server's CREATE2 prediction may differ if the factory uses different proxy bytecode.
-	if deployTxHashStr, ok := deployResult["txHash"].(string); ok && deployTxHashStr != "" {
-		deployTxHash := common.HexToHash(deployTxHashStr)
-		receipt, recErr := client.TransactionReceipt(ctx, deployTxHash)
-		if recErr == nil && receipt != nil {
-			proxyCreationTopic := crypto.Keccak256Hash([]byte("ProxyCreation(address,address)"))
-			for _, l := range receipt.Logs {
-				if len(l.Topics) == 0 || l.Topics[0] != proxyCreationTopic {
-					continue
-				}
-				if len(l.Topics) >= 2 {
-					safeAddr    = common.HexToAddress(l.Topics[1].Hex())
-					safeAddrStr = safeAddr.Hex()
-				} else if len(l.Data) >= 32 {
-					safeAddr    = common.BytesToAddress(l.Data[:32])
-					safeAddrStr = safeAddr.Hex()
-				}
-				break
+		// Wait for contract code to be queryable on the RPC node.
+		waitCodeVisible(ctx, client, s.safeAddr)
+
+		// Print owners for visibility.
+		safeContract := bind.NewBoundContract(s.safeAddr, ownersABI, client, client, client)
+		var ownersOut []interface{}
+		if callErr := safeContract.Call(&bind.CallOpts{Context: ctx}, &ownersOut, "getOwners"); callErr == nil && len(ownersOut) > 0 {
+			for _, o := range ownersOut[0].([]common.Address) {
+				fmt.Printf("   owner   : %s\n", o.Hex())
 			}
 		}
-	}
-	fmt.Printf("✅  Safe confirmed at: %s\n", safeAddrStr)
 
-	// Wait for contract code to be visible on the RPC node (Alchemy Base Sepolia has brief lag
-	// between block confirmation and state propagation on the read path).
-	fmt.Print("   ⏳ waiting for Safe code to appear on RPC...")
-	codeVisible := false
-	for i := 0; i < 15; i++ {
-		code, _ := client.CodeAt(ctx, safeAddr, nil)
-		if len(code) > 0 {
-			codeVisible = true
-			fmt.Printf(" visible (%d bytes)\n", len(code))
-			break
+		// d. fund Safe
+		walletNonce, _ := client.PendingNonceAt(ctx, walletAddr)
+		gasPrice, _    := client.SuggestGasPrice(ctx)
+		auth, _        := bind.NewKeyedTransactorWithChainID(walletKey, chainID)
+		auth.Nonce      = big.NewInt(int64(walletNonce))
+		auth.GasLimit   = uint64(100000)
+		auth.GasPrice   = gasPrice
+
+		fundTx, err := tokenContract.Transact(auth, "transfer", s.safeAddr, big.NewInt(1))
+		if err != nil {
+			fmt.Printf("❌  fund Safe %d: %v\n", i+1, err)
+			os.Exit(1)
 		}
-		fmt.Print(".")
-		time.Sleep(3 * time.Second)
-	}
-	if !codeVisible {
-		fmt.Println("\n⚠️  Safe code not visible after 45s — continuing anyway")
-	}
-
-	// Verify the Safe's owner matches the stealth address.
-	ownersABI, _ := abi.JSON(strings.NewReader(`[{"inputs":[],"name":"getOwners","outputs":[{"internalType":"address[]","name":"","type":"address[]"}],"stateMutability":"view","type":"function"}]`))
-	safeContract := bind.NewBoundContract(safeAddr, ownersABI, client, client, client)
-	var ownersOut []interface{}
-	if callErr := safeContract.Call(&bind.CallOpts{Context: ctx}, &ownersOut, "getOwners"); callErr == nil && len(ownersOut) > 0 {
-		owners := ownersOut[0].([]common.Address)
-		for _, o := range owners {
-			fmt.Printf("   owner: %s\n", o.Hex())
+		if err := waitTx(ctx, client, fundTx.Hash()); err != nil {
+			fmt.Printf("❌  fund tx Safe %d: %v\n", i+1, err)
+			os.Exit(1)
 		}
-	} else {
-		fmt.Printf("   ⚠️  could not fetch owners: %v\n", callErr)
-	}
-	fmt.Println()
 
-	// ── 6. Fund the confirmed Safe address ───────────────────────────────────
-	fundAmount := big.NewInt(1) // 1 smallest unit — enough to prove the flow
-
-	nonce, _     := client.PendingNonceAt(ctx, walletAddr)
-	gasPrice, _  := client.SuggestGasPrice(ctx)
-	auth, _      := bind.NewKeyedTransactorWithChainID(walletKey, chainID)
-	auth.Nonce    = big.NewInt(int64(nonce))
-	auth.GasLimit = uint64(100000)
-	auth.GasPrice = gasPrice
-
-	fmt.Printf("💸  funding Safe with %s token unit(s)...\n", fundAmount)
-	fundTx, err := tokenContract.Transact(auth, "transfer", safeAddr, fundAmount)
-	if err != nil {
-		fmt.Printf("❌  fund Safe: %v\n", err)
-		os.Exit(1)
-	}
-	if err := waitTx(ctx, client, fundTx.Hash()); err != nil {
-		fmt.Printf("❌  fund tx: %v\n", err)
-		os.Exit(1)
-	}
-	// Poll until the balance is reflected — Alchemy RPC can lag behind the latest block.
-	var balBefore *big.Int
-	for i := 0; i < 10; i++ {
-		balBefore = tokenBalance(ctx, client, tokenAddr, safeAddr)
-		if balBefore.Cmp(big.NewInt(0)) > 0 {
-			break
+		// Poll until balance is visible (RPC propagation lag).
+		for j := 0; j < 10; j++ {
+			s.balBefore = tokenBalance(ctx, client, tokenAddr, s.safeAddr)
+			if s.balBefore.Cmp(big.NewInt(0)) > 0 {
+				break
+			}
+			time.Sleep(3 * time.Second)
 		}
-		time.Sleep(3 * time.Second)
-	}
-	if balBefore.Cmp(big.NewInt(0)) == 0 {
-		fmt.Println("❌  Safe balance still 0 after polling — token transfer may have failed")
-		os.Exit(1)
-	}
-	fmt.Printf("✅  Safe funded — balance: %s\n\n", balBefore)
-
-	// ── 7. Build Safe tx: transfer tokens back to test wallet ─────────────────
-	transferData, err := erc20.Pack("transfer", walletAddr, balBefore)
-	if err != nil {
-		fmt.Printf("❌  encode transfer: %v\n", err)
-		os.Exit(1)
+		if s.balBefore.Cmp(big.NewInt(0)) == 0 {
+			fmt.Printf("❌  Safe %d balance still 0 after polling\n", i+1)
+			os.Exit(1)
+		}
+		fmt.Printf("   funded  : balance = %s\n", s.balBefore)
 	}
 
-	safeTxHash, err := getSafeTxHash(ctx, client, safeAddr, tokenAddr, big.NewInt(0), transferData, 0)
-	if err != nil {
-		fmt.Printf("❌  getSafeTxHash: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("🔐  Safe tx hash: %x\n", safeTxHash)
+	// ── 3. Build Safe txs and sign ────────────────────────────────────────────
+	fmt.Printf("\n─── Building and signing %d Safe txs ───────────────────\n", numSafes)
+	for i := range slots {
+		s := &slots[i]
 
-	// ── 8. Sign Safe tx hash with stealth private key ─────────────────────────
-	sig, err := crypto.Sign(safeTxHash[:], stealthPrivKey)
-	if err != nil {
-		fmt.Printf("❌  sign: %v\n", err)
-		os.Exit(1)
-	}
-	// Safe expects v = 27 or 28
-	sig[64] += 27
+		txData, err := erc20.Pack("transfer", walletAddr, s.balBefore)
+		if err != nil {
+			fmt.Printf("❌  encode transfer [%d]: %v\n", i+1, err)
+			os.Exit(1)
+		}
+		s.transferData = txData
 
-	// ── 9. Call relay-batch ───────────────────────────────────────────────────
-	fmt.Println("📡  calling relay-batch...")
+		safeTxHash, err := getSafeTxHash(ctx, client, s.safeAddr, tokenAddr, big.NewInt(0), txData, 0)
+		if err != nil {
+			fmt.Printf("❌  getSafeTxHash [%d]: %v\n", i+1, err)
+			os.Exit(1)
+		}
+
+		rawSig, err := crypto.Sign(safeTxHash[:], s.stealthPrivKey)
+		if err != nil {
+			fmt.Printf("❌  sign [%d]: %v\n", i+1, err)
+			os.Exit(1)
+		}
+		rawSig[64] += 27 // Safe expects v = 27 or 28
+		s.sig = rawSig
+
+		fmt.Printf("   [%d] hash=%x  sig_v=%d\n", i+1, safeTxHash[:8], rawSig[64])
+	}
+
+	// ── 4. POST relay-batch with all 3 items ──────────────────────────────────
+	items := make([]map[string]interface{}, numSafes)
+	for i, s := range slots {
+		items[i] = map[string]interface{}{
+			"safeAddress": s.safeAddrStr,
+			"chainId":     chainIDStr,
+			"to":          tokenAddr.Hex(),
+			"value":       "0",
+			"data":        "0x" + hex.EncodeToString(s.transferData),
+			"operation":   0,
+			"signature":   "0x" + hex.EncodeToString(s.sig),
+		}
+	}
 	batchPayload := map[string]interface{}{
 		"allowFailure": false,
-		"items": []map[string]interface{}{
-			{
-				"safeAddress": safeAddrStr,
-				"chainId":     chainIDStr,
-				"to":          tokenAddr.Hex(),
-				"value":       "0",
-				"data":        "0x" + hex.EncodeToString(transferData),
-				"operation":   0,
-				"signature":   "0x" + hex.EncodeToString(sig),
-			},
-		},
+		"items":        items,
 	}
 
+	fmt.Printf("\n📡  calling relay-batch with %d items...\n", numSafes)
 	batchBody, status, err := post(relayerURL+"/recipient/relay-batch", batchPayload)
 	if err != nil || status != 200 {
 		fmt.Printf("❌  relay-batch: status=%d body=%s err=%v\n", status, batchBody, err)
@@ -430,38 +449,52 @@ func main() {
 	txHashStr := batchResult["txHash"].(string)
 	fmt.Printf("✅  relay-batch submitted — txHash: %s\n", txHashStr)
 
-	// ── 10. Wait and verify ───────────────────────────────────────────────────
-	txHash := common.HexToHash(txHashStr)
-	if err := waitTx(ctx, client, txHash); err != nil {
+	// ── 5. Wait for batch tx and inspect receipt ──────────────────────────────
+	batchTxHash := common.HexToHash(txHashStr)
+	if err := waitTx(ctx, client, batchTxHash); err != nil {
 		fmt.Printf("❌  batch tx: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Inspect receipt for Safe execution events (helps diagnose failures).
-	batchReceipt, _ := client.TransactionReceipt(ctx, txHash)
-	if batchReceipt != nil {
+	receipt, _ := client.TransactionReceipt(ctx, batchTxHash)
+	if receipt != nil {
 		execSuccessTopic := crypto.Keccak256Hash([]byte("ExecutionSuccess(bytes32,uint256)"))
 		execFailTopic    := crypto.Keccak256Hash([]byte("ExecutionFailure(bytes32,uint256)"))
-		for _, l := range batchReceipt.Logs {
+		for _, l := range receipt.Logs {
 			if len(l.Topics) == 0 {
 				continue
 			}
-			if l.Topics[0] == execSuccessTopic {
-				fmt.Printf("ℹ️   Safe %s emitted ExecutionSuccess\n", l.Address.Hex()[:12]+"...")
-			} else if l.Topics[0] == execFailTopic {
-				fmt.Printf("⚠️   Safe %s emitted ExecutionFailure — inner call failed\n", l.Address.Hex()[:12]+"...")
+			switch l.Topics[0] {
+			case execSuccessTopic:
+				fmt.Printf("ℹ️   Safe %s  ExecutionSuccess\n", l.Address.Hex()[:14]+"...")
+			case execFailTopic:
+				fmt.Printf("⚠️   Safe %s  ExecutionFailure — inner call failed\n", l.Address.Hex()[:14]+"...")
 			}
 		}
 	}
 
-	balAfter := tokenBalance(ctx, client, tokenAddr, safeAddr)
-	fmt.Printf("\n📊  Safe balance before: %s\n", balBefore)
-	fmt.Printf("📊  Safe balance after : %s\n", balAfter)
+	// ── 6. Verify all balances ────────────────────────────────────────────────
+	fmt.Println()
+	passed := 0
+	for i, s := range slots {
+		balAfter := tokenBalance(ctx, client, tokenAddr, s.safeAddr)
+		moved := balAfter.Cmp(big.NewInt(0)) == 0 && s.balBefore.Cmp(big.NewInt(0)) > 0
+		status := "✅"
+		if !moved {
+			status = "❌"
+		} else {
+			passed++
+		}
+		fmt.Printf("%s  Safe %d  before=%-3s  after=%-3s  %s\n",
+			status, i+1, s.balBefore, balAfter,
+			map[bool]string{true: "tokens moved", false: "FAILED — balance unchanged"}[moved])
+	}
 
-	if balAfter.Cmp(big.NewInt(0)) == 0 && balBefore.Cmp(big.NewInt(0)) > 0 {
-		fmt.Println("\n✅  relay-batch E2E PASSED — tokens moved out of Safe")
+	fmt.Println()
+	if passed == numSafes {
+		fmt.Printf("✅  relay-batch E2E PASSED — all %d Safes drained in one tx\n", numSafes)
 	} else {
-		fmt.Println("\n❌  relay-batch E2E FAILED — balance did not change as expected")
+		fmt.Printf("❌  relay-batch E2E FAILED — %d/%d Safes passed\n", passed, numSafes)
 		os.Exit(1)
 	}
 }
