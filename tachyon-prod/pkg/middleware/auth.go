@@ -4,9 +4,14 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"os"
+	"strconv"
+	"time"
 
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gin-gonic/gin"
 )
 
@@ -51,4 +56,70 @@ func GenerateAPIKey() string {
 	b := make([]byte, 16)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// WalletSignatureAuth recovers the caller's wallet address from the request signature.
+// The client must sign "tachyon-auth:{unix_timestamp}" and pass the result in
+// X-Signature and X-Timestamp headers. The recovered address is set in the gin context
+// as "verified_address" for handlers to use. Signatures older than 30 minutes are rejected.
+func WalletSignatureAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		sig := c.GetHeader("X-Signature")
+		tsStr := c.GetHeader("X-Timestamp")
+
+		if sig == "" || tsStr == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"success": false,
+				"error":   "X-Signature and X-Timestamp headers are required",
+			})
+			return
+		}
+
+		ts, err := strconv.ParseInt(tsStr, 10, 64)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error":   "Invalid X-Timestamp value",
+			})
+			return
+		}
+
+		if time.Now().Unix()-ts > 1800 {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"success": false,
+				"error":   "Signature expired — timestamp is older than 30 minutes",
+			})
+			return
+		}
+
+		msg := fmt.Sprintf("tachyon-auth:%d", ts)
+		prefix := fmt.Sprintf("\x19Ethereum Signed Message:\n%d", len(msg))
+		hash := crypto.Keccak256Hash([]byte(prefix + msg))
+
+		sigBytes, err := hexutil.Decode(sig)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error":   "Invalid X-Signature encoding",
+			})
+			return
+		}
+
+		// Normalize Ethereum v byte from 27/28 to 0/1
+		if len(sigBytes) == 65 && sigBytes[64] >= 27 {
+			sigBytes[64] -= 27
+		}
+
+		pubKey, err := crypto.SigToPub(hash.Bytes(), sigBytes)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"success": false,
+				"error":   "Could not recover signer from signature",
+			})
+			return
+		}
+
+		c.Set("verified_address", crypto.PubkeyToAddress(*pubKey).Hex())
+		c.Next()
+	}
 }

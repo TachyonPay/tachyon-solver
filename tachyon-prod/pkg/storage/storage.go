@@ -18,15 +18,16 @@ type Store struct {
 
 // Prefix constants for different data types
 const (
-	PrefixIntent          = "intent:"
-	PrefixRecipient       = "recipient:"
-	PrefixIntentDetails   = "intent_details:"
-	PrefixSolver          = "solver:"
-	PrefixLastBlock       = "last_block:"
-	PrefixActiveIntent    = "active_intent:"
-	PrefixHandlingWin     = "handling_win:"
+	PrefixIntent           = "intent:"
+	PrefixRecipient        = "recipient:"
+	PrefixIntentDetails    = "intent_details:"
+	PrefixSolver           = "solver:"
+	PrefixLastBlock        = "last_block:"
+	PrefixActiveIntent     = "active_intent:"
+	PrefixHandlingWin      = "handling_win:"
 	PrefixRecipientAccount = "recipient_account:"
 	PrefixStealthByAddr    = "stealth_by_addr:"
+	PrefixTxHistory        = "tx_history:"
 )
 
 // NewStore creates a new PebbleDB store at the given path

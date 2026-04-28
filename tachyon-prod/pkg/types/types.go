@@ -334,3 +334,33 @@ type RelayProxyResponse struct {
 	TxHash  string `json:"txHash,omitempty"`
 	Error   string `json:"error,omitempty"`
 }
+
+// TransactionRecord stores the full lifecycle of an on-chain intent for user-facing history
+type TransactionRecord struct {
+	IntentID        string     `json:"intentId"`
+	UserAddress     string     `json:"userAddress"`
+	SourceChainID   string     `json:"sourceChainId"`
+	DestChainID     string     `json:"destChainId"`
+	TokenA          string     `json:"tokenA"`
+	TokenB          string     `json:"tokenB"`
+	AmountA         string     `json:"amountA"`
+	ExpectedAmountB string     `json:"expectedAmountB"`
+	Status          string     `json:"status"` // "pending" | "completed"
+	DepositTxHash   string     `json:"depositTxHash,omitempty"`
+	SolveTxHash     string     `json:"solveTxHash,omitempty"`
+	SettleTxHash    string     `json:"settleTxHash,omitempty"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
+	CompletedAt     *time.Time `json:"completedAt,omitempty"`
+}
+
+// TransactionPageResponse is the paginated response for transaction history
+type TransactionPageResponse struct {
+	Success      bool                 `json:"success"`
+	Transactions []*TransactionRecord `json:"transactions"`
+	Page         int                  `json:"page"`
+	Limit        int                  `json:"limit"`
+	Total        int                  `json:"total"`
+	TotalPages   int                  `json:"totalPages"`
+	Error        string               `json:"error,omitempty"`
+}

@@ -534,6 +534,9 @@ func (s *Solver) handleNewIntent(ctx context.Context, networkKey string, intentI
 		return
 	}
 
+	// Record intent as pending in transaction history as soon as it is detected
+	s.saveTransactionRecord(intent, networkKey)
+
 	profitable, bidAmount := s.calculateProfitableBid(ctx, networkKey, intent)
 	if !profitable {
 		log.WithFields(log.Fields{
@@ -967,6 +970,11 @@ func (s *Solver) handleAuctionWon(ctx context.Context, networkKey string, intent
 	s.txMutexes[networkKey].Lock()
 	defer s.txMutexes[networkKey].Unlock()
 
+	// Stale RPC nodes lag behind confirmed state; a prior Safe tx on this chain
+	// (e.g. a concurrent solve flow) may not yet be reflected, causing the nonce
+	// read inside ApproveTokenViaSafe to return a stale value and the tx to revert.
+	time.Sleep(5 * time.Second)
+
 	approveTx, err := s.retryTransaction(ctx, networkKey, "approve-tokens", func() (*ethtypes.Transaction, error) {
 		if client.HasSafe() {
 			return client.ApproveTokenViaSafe(ctx, tokenAddr, bidAmount)
@@ -1365,6 +1373,13 @@ func (s *Solver) settleIntent(ctx context.Context, network string, chain1IntentI
 				"attempts": attempt + 1,
 			}).Info("Intent settled successfully")
 
+			// Update transaction history record to completed
+			settleTxHash := settleResp.SettleTxHash
+			if settleTxHash == "" {
+				settleTxHash = settleResp.TransactionHash
+			}
+			s.completeTransactionRecord(chain1IntentID.String(), depositTxHash, solveTxHash, settleTxHash)
+
 			// Update status
 			key := fmt.Sprintf("%s-%s", network, chain1IntentID.String())
 			s.mu.Lock()
@@ -1427,6 +1442,54 @@ func (s *Solver) persistLastProcessedBlock(networkKey string, blockNum *big.Int)
 			"block":   blockNum.String(),
 		}).Error("Failed to persist last processed block")
 	}
+}
+
+// saveTransactionRecord writes a new "pending" transaction record for a detected intent.
+// Skips silently if a record already exists for this intent ID.
+func (s *Solver) saveTransactionRecord(intent *types.Intent, networkKey string) {
+	if existing, _ := s.store.GetTransactionRecord(intent.IntentID.String()); existing != nil {
+		return
+	}
+	now := time.Now()
+	record := &types.TransactionRecord{
+		IntentID:        intent.IntentID.String(),
+		UserAddress:     intent.User,
+		SourceChainID:   networkKey,
+		DestChainID:     intent.DestChainId.String(),
+		TokenA:          intent.TokenA,
+		TokenB:          intent.TokenB,
+		AmountA:         intent.AmountA.String(),
+		ExpectedAmountB: intent.ExpectedAmountB.String(),
+		Status:          "pending",
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if err := s.store.SaveTransactionRecord(record); err != nil {
+		log.WithError(err).WithField("intentID", intent.IntentID).Error("Failed to save transaction record")
+	}
+}
+
+// completeTransactionRecord marks a transaction record as completed and attaches all tx hashes.
+func (s *Solver) completeTransactionRecord(intentID, depositTxHash, solveTxHash, settleTxHash string) {
+	record, err := s.store.GetTransactionRecord(intentID)
+	if err != nil || record == nil {
+		return
+	}
+	now := time.Now()
+	record.Status = "completed"
+	record.DepositTxHash = depositTxHash
+	record.SolveTxHash = solveTxHash
+	record.SettleTxHash = settleTxHash
+	record.UpdatedAt = now
+	record.CompletedAt = &now
+	if err := s.store.SaveTransactionRecord(record); err != nil {
+		log.WithError(err).WithField("intentID", intentID).Error("Failed to update transaction record to completed")
+	}
+}
+
+// GetTransactionsByUser exposes paginated transaction history for a user address.
+func (s *Solver) GetTransactionsByUser(userAddress, status string, page, limit int) ([]*types.TransactionRecord, int, error) {
+	return s.store.GetTransactionsByUser(userAddress, status, page, limit)
 }
 
 // ---------------------------------------------------------------------------
