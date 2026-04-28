@@ -333,6 +333,76 @@ func (r *Relayer) RelayProxy(ctx context.Context, req *types.RelayProxyRequest) 
 	}, nil
 }
 
+// RelayBatch accepts multiple pre-signed Safe transactions, encodes every execTransaction
+// call into a single MultiSendCallOnly transaction, and submits it from the relayer EOA.
+// All items must target the same chainId; the relayer pays gas for the entire batch.
+func (r *Relayer) RelayBatch(ctx context.Context, req *types.RelayBatchRequest) (*types.RelayBatchResponse, error) {
+	if len(req.Items) == 0 {
+		return nil, fmt.Errorf("items list is empty")
+	}
+
+	// All items must share the same chain so we submit one tx.
+	chainID := req.Items[0].ChainID
+	for i, item := range req.Items {
+		if item.ChainID != chainID {
+			return nil, fmt.Errorf("item %d has chainId %s, expected %s — all items must share the same chain", i, item.ChainID, chainID)
+		}
+	}
+
+	client, ok := r.clients[chainID]
+	if !ok {
+		return nil, fmt.Errorf("chain %s not configured", chainID)
+	}
+
+	// Parse and decode each item.
+	batchItems := make([]blockchain.BatchRelayItem, 0, len(req.Items))
+	for i, item := range req.Items {
+		value := new(big.Int)
+		if item.Value != "" && item.Value != "0" {
+			if _, ok := value.SetString(item.Value, 10); !ok {
+				return nil, fmt.Errorf("item %d: invalid value %q", i, item.Value)
+			}
+		}
+
+		data := []byte{}
+		if item.Data != "" && item.Data != "0x" {
+			hexStr := strings.TrimPrefix(item.Data, "0x")
+			var err error
+			data, err = hex.DecodeString(hexStr)
+			if err != nil {
+				return nil, fmt.Errorf("item %d: invalid data hex: %w", i, err)
+			}
+		}
+
+		sigBytes, err := hex.DecodeString(strings.TrimPrefix(item.Signature, "0x"))
+		if err != nil {
+			return nil, fmt.Errorf("item %d: invalid signature hex: %w", i, err)
+		}
+
+		batchItems = append(batchItems, blockchain.BatchRelayItem{
+			SafeAddr:  common.HexToAddress(item.SafeAddress),
+			To:        common.HexToAddress(item.To),
+			Value:     value,
+			Data:      data,
+			Operation: item.Operation,
+			Signature: sigBytes,
+		})
+	}
+
+	r.txMutexes[chainID].Lock()
+	defer r.txMutexes[chainID].Unlock()
+
+	tx, err := client.RelayBatch(ctx, batchItems, req.AllowFailure)
+	if err != nil {
+		return nil, fmt.Errorf("relay batch failed: %w", err)
+	}
+
+	return &types.RelayBatchResponse{
+		Success: true,
+		TxHash:  tx.Hash().Hex(),
+	}, nil
+}
+
 // DeploySafe deploys a Safe smart account on a stealth address.
 // Anyone can call this endpoint, but must provide a valid signature from
 // the stealth address's spend private key.

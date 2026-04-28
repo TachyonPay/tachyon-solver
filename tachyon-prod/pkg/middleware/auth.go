@@ -4,15 +4,14 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
-	"fmt"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gin-gonic/gin"
+	"github.com/zk-tachyon/tachyon-prod/pkg/stealth"
 )
 
 func APIKeyAuth() gin.HandlerFunc {
@@ -92,10 +91,6 @@ func WalletSignatureAuth() gin.HandlerFunc {
 			return
 		}
 
-		msg := fmt.Sprintf("tachyon-auth:%d", ts)
-		prefix := fmt.Sprintf("\x19Ethereum Signed Message:\n%d", len(msg))
-		hash := crypto.Keccak256Hash([]byte(prefix + msg))
-
 		sigBytes, err := hexutil.Decode(sig)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
@@ -105,12 +100,7 @@ func WalletSignatureAuth() gin.HandlerFunc {
 			return
 		}
 
-		// Normalize Ethereum v byte from 27/28 to 0/1
-		if len(sigBytes) == 65 && sigBytes[64] >= 27 {
-			sigBytes[64] -= 27
-		}
-
-		pubKey, err := crypto.SigToPub(hash.Bytes(), sigBytes)
+		recovered, err := stealth.RecoverAuthSession(sigBytes, ts)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"success": false,
@@ -119,7 +109,7 @@ func WalletSignatureAuth() gin.HandlerFunc {
 			return
 		}
 
-		c.Set("verified_address", crypto.PubkeyToAddress(*pubKey).Hex())
+		c.Set("verified_address", recovered.Hex())
 		c.Next()
 	}
 }

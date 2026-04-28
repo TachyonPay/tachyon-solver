@@ -43,6 +43,7 @@ func (api *RelayerAPI) RegisterRoutes(r *gin.Engine) {
 	r.POST("/recipient/derive-stealth-key", api.DeriveStealthKey)
 	r.POST("/recipient/deploy-safe", api.DeploySafe)
 	r.POST("/recipient/relay-proxy", api.RelayProxy)
+	r.POST("/recipient/relay-batch", api.RelayBatch)
 }
 
 // RegisterAdminRoutes registers admin-only routes (call with auth middleware group)
@@ -416,6 +417,38 @@ func (api *RelayerAPI) RelayProxy(c *gin.Context) {
 	response, err := api.relayer.RelayProxy(c.Request.Context(), &req)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, types.RelayProxyResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// RelayBatch encodes multiple pre-signed Safe transactions into one MultiSendCallOnly tx.
+func (api *RelayerAPI) RelayBatch(c *gin.Context) {
+	var req types.RelayBatchRequest
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, types.RelayBatchResponse{
+			Success: false,
+			Error:   "Invalid request body: " + err.Error(),
+		})
+		return
+	}
+
+	if len(req.Items) == 0 {
+		c.JSON(http.StatusBadRequest, types.RelayBatchResponse{
+			Success: false,
+			Error:   "items must not be empty",
+		})
+		return
+	}
+
+	response, err := api.relayer.RelayBatch(c.Request.Context(), &req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, types.RelayBatchResponse{
 			Success: false,
 			Error:   err.Error(),
 		})

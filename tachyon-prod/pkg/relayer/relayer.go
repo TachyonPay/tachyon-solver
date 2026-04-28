@@ -52,6 +52,7 @@ func NewRelayer(cfg *config.Config) (*Relayer, error) {
 			chainCfg.Name,
 			"",  // relayer uses its own key directly, no Safe
 			nil, // no Safe signing keys needed for relayer
+			chainCfg.Multicall3Address,
 		)
 		if err != nil {
 			store.Close()

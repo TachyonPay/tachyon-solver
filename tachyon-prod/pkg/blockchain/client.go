@@ -24,23 +24,25 @@ const bridgeIntentABI = `[{"inputs":[{"internalType":"uint256","name":"_chainId"
 
 // Client wraps Ethereum client with contract interaction
 type Client struct {
-	ethClient       *ethclient.Client
-	contractAddr    common.Address
-	contract        *bind.BoundContract
-	contractABI     abi.ABI
-	privateKey      *ecdsa.PrivateKey
-	publicKey       *ecdsa.PublicKey
-	address         common.Address
-	safeAddress     common.Address    // zero if no Safe configured
-	safeSigningKeys []*ecdsa.PrivateKey // TEE keys that co-sign Safe transactions
-	chainID         *big.Int
-	networkName     string
+	ethClient        *ethclient.Client
+	contractAddr     common.Address
+	contract         *bind.BoundContract
+	contractABI      abi.ABI
+	privateKey       *ecdsa.PrivateKey
+	publicKey        *ecdsa.PublicKey
+	address          common.Address
+	safeAddress      common.Address     // zero if no Safe configured
+	safeSigningKeys  []*ecdsa.PrivateKey // TEE keys that co-sign Safe transactions
+	multicall3Addr   common.Address     // Multicall3 contract for relay-batch; zero = disabled
+	chainID          *big.Int
+	networkName      string
 }
 
 // NewClient creates a new blockchain client.
 // safeAddress: Gnosis Safe address on this chain — empty string if not using a Safe.
 // safeSigningKeys: the TEE private keys that co-sign Safe transactions (all must sign to reach threshold).
-func NewClient(rpcURL string, contractAddress string, privateKeyHex string, chainID *big.Int, networkName string, safeAddress string, safeSigningKeys []*ecdsa.PrivateKey) (*Client, error) {
+// multicall3Address: Multicall3 contract address for relay-batch — empty string disables batching on this chain.
+func NewClient(rpcURL string, contractAddress string, privateKeyHex string, chainID *big.Int, networkName string, safeAddress string, safeSigningKeys []*ecdsa.PrivateKey, multicall3Address string) (*Client, error) {
 	ethClient, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Ethereum client: %w", err)
@@ -73,25 +75,32 @@ func NewClient(rpcURL string, contractAddress string, privateKeyHex string, chai
 		safeAddr = common.HexToAddress(safeAddress)
 	}
 
+	var mc3Addr common.Address
+	if multicall3Address != "" {
+		mc3Addr = common.HexToAddress(multicall3Address)
+	}
+
 	log.WithFields(log.Fields{
-		"network":     networkName,
-		"address":     address.Hex(),
-		"chainID":     chainID,
-		"safeAddress": safeAddr.Hex(),
+		"network":          networkName,
+		"address":          address.Hex(),
+		"chainID":          chainID,
+		"safeAddress":      safeAddr.Hex(),
+		"multicall3Addr":   mc3Addr.Hex(),
 	}).Info("Blockchain client initialized")
 
 	return &Client{
-		ethClient:       ethClient,
-		contractAddr:    contractAddr,
-		contract:        contract,
-		contractABI:     contractABI,
-		privateKey:      privateKey,
-		publicKey:       publicKeyECDSA,
-		address:         address,
-		safeAddress:     safeAddr,
-		safeSigningKeys: safeSigningKeys,
-		chainID:         chainID,
-		networkName:     networkName,
+		ethClient:        ethClient,
+		contractAddr:     contractAddr,
+		contract:         contract,
+		contractABI:      contractABI,
+		privateKey:       privateKey,
+		publicKey:        publicKeyECDSA,
+		address:          address,
+		safeAddress:      safeAddr,
+		safeSigningKeys:  safeSigningKeys,
+		multicall3Addr:   mc3Addr,
+		chainID:          chainID,
+		networkName:      networkName,
 	}, nil
 }
 
@@ -706,6 +715,147 @@ func (c *Client) RelaySafeTransaction(ctx context.Context, safeAddr common.Addre
 		"to":     to.Hex(),
 		"txHash": tx.Hash().Hex(),
 	}).Info("Safe transaction relayed")
+
+	return tx, nil
+}
+
+// multicall3ABI is the minimal ABI for Multicall3.aggregate3.
+// aggregate3 batches arbitrary calls and is deployed at a well-known address on most EVM chains.
+const multicall3ABI = `[{
+  "inputs":[{"components":[
+    {"internalType":"address","name":"target","type":"address"},
+    {"internalType":"bool","name":"allowFailure","type":"bool"},
+    {"internalType":"bytes","name":"callData","type":"bytes"}
+  ],"internalType":"struct Multicall3.Call3[]","name":"calls","type":"tuple[]"}],
+  "name":"aggregate3",
+  "outputs":[{"components":[
+    {"internalType":"bool","name":"success","type":"bool"},
+    {"internalType":"bytes","name":"returnData","type":"bytes"}
+  ],"internalType":"struct Multicall3.Result[]","name":"returnData","type":"tuple[]"}],
+  "stateMutability":"payable",
+  "type":"function"
+}]`
+
+// BatchRelayItem is a parsed, decoded item ready for RelayBatch.
+type BatchRelayItem struct {
+	SafeAddr  common.Address
+	To        common.Address
+	Value     *big.Int
+	Data      []byte
+	Operation uint8
+	Signature []byte // 65-byte sig from the Safe owner
+}
+
+// multicall3Call mirrors Multicall3.Call3 for ABI encoding.
+type multicall3Call struct {
+	Target       common.Address
+	AllowFailure bool
+	CallData     []byte
+}
+
+// RelayBatch verifies each pre-signed Safe transaction, encodes all execTransaction
+// calls into one Multicall3.aggregate3 transaction, and submits it from the relayer EOA.
+// allowFailure=false → atomic (any failure reverts all); true → best-effort (failures are skipped).
+func (c *Client) RelayBatch(ctx context.Context, items []BatchRelayItem, allowFailure bool) (*types.Transaction, error) {
+	if len(items) == 0 {
+		return nil, fmt.Errorf("batch is empty")
+	}
+	if c.multicall3Addr == (common.Address{}) {
+		return nil, fmt.Errorf("Multicall3 not configured for chain %s — set CHAIN_i_MULTICALL3 in env", c.networkName)
+	}
+
+	safeABI, err := abi.JSON(strings.NewReader(safeExecABI))
+	if err != nil {
+		return nil, fmt.Errorf("parse safe ABI: %w", err)
+	}
+
+	calls := make([]multicall3Call, 0, len(items))
+	for i, item := range items {
+		safe := bind.NewBoundContract(item.SafeAddr, safeABI, c.ethClient, c.ethClient, c.ethClient)
+
+		// Fetch current Safe nonce.
+		var nonceResult []interface{}
+		if err := safe.Call(&bind.CallOpts{Context: ctx}, &nonceResult, "nonce"); err != nil {
+			return nil, fmt.Errorf("item %d: get safe nonce: %w", i, err)
+		}
+		safeNonce := nonceResult[0].(*big.Int)
+
+		// Compute SafeTxHash (all gas params zero — relayer pays externally).
+		var hashResult []interface{}
+		if err := safe.Call(&bind.CallOpts{Context: ctx}, &hashResult, "getTransactionHash",
+			item.To, item.Value, item.Data, item.Operation,
+			big.NewInt(0), big.NewInt(0), big.NewInt(0),
+			common.Address{}, common.Address{},
+			safeNonce,
+		); err != nil {
+			return nil, fmt.Errorf("item %d: get transaction hash: %w", i, err)
+		}
+		txHash := hashResult[0].([32]byte)
+
+		// Recover signer for logging; Safe rejects invalid sigs on-chain.
+		sigForRecovery := make([]byte, 65)
+		copy(sigForRecovery, item.Signature)
+		if sigForRecovery[64] >= 27 {
+			sigForRecovery[64] -= 27
+		}
+		pubKey, err := crypto.SigToPub(txHash[:], sigForRecovery)
+		if err != nil {
+			return nil, fmt.Errorf("item %d: recover signer: %w", i, err)
+		}
+		log.WithFields(log.Fields{
+			"item":   i,
+			"safe":   item.SafeAddr.Hex(),
+			"signer": crypto.PubkeyToAddress(*pubKey).Hex(),
+		}).Info("RelayBatch: verified item signer")
+
+		// Normalise v to 27/28 as Safe expects.
+		safeSig := make([]byte, 65)
+		copy(safeSig, item.Signature)
+		if safeSig[64] < 27 {
+			safeSig[64] += 27
+		}
+
+		// Encode execTransaction calldata for this Safe.
+		callData, err := safeABI.Pack("execTransaction",
+			item.To, item.Value, item.Data, item.Operation,
+			big.NewInt(0), big.NewInt(0), big.NewInt(0),
+			common.Address{}, common.Address{},
+			safeSig,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("item %d: encode execTransaction: %w", i, err)
+		}
+
+		calls = append(calls, multicall3Call{
+			Target:       item.SafeAddr,
+			AllowFailure: allowFailure,
+			CallData:     callData,
+		})
+	}
+
+	mc3ABI, err := abi.JSON(strings.NewReader(multicall3ABI))
+	if err != nil {
+		return nil, fmt.Errorf("parse multicall3 ABI: %w", err)
+	}
+	mc3Contract := bind.NewBoundContract(c.multicall3Addr, mc3ABI, c.ethClient, c.ethClient, c.ethClient)
+
+	auth, err := c.getTransactOpts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// 150k base + 200k per Safe call (execTransaction ~100–150k each, buffer included).
+	auth.GasLimit = uint64(150000 + len(items)*200000)
+
+	tx, err := mc3Contract.Transact(auth, "aggregate3", calls)
+	if err != nil {
+		return nil, fmt.Errorf("submit aggregate3 tx: %w", err)
+	}
+
+	log.WithFields(log.Fields{
+		"txHash":     tx.Hash().Hex(),
+		"items":      len(items),
+		"multicall3": c.multicall3Addr.Hex(),
+	}).Info("RelayBatch: aggregate3 submitted")
 
 	return tx, nil
 }
