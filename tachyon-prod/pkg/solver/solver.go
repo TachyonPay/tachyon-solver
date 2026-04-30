@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/big"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -1506,6 +1507,7 @@ func (s *Solver) saveTransactionRecord(intent *types.Intent, networkKey string) 
 }
 
 // completeTransactionRecord marks a transaction record as completed and attaches all tx hashes.
+// It also notifies the relayer so the FE can see the final status via GET /transactions.
 func (s *Solver) completeTransactionRecord(sourceChainID, intentID, depositTxHash, solveTxHash, settleTxHash string) {
 	record, err := s.store.GetTransactionRecord(sourceChainID, intentID)
 	if err != nil || record == nil {
@@ -1520,6 +1522,46 @@ func (s *Solver) completeTransactionRecord(sourceChainID, intentID, depositTxHas
 	record.CompletedAt = &now
 	if err := s.store.SaveTransactionRecord(record); err != nil {
 		log.WithError(err).WithField("intentID", intentID).Error("Failed to update transaction record to completed")
+	}
+
+	go s.notifyRelayerComplete(sourceChainID, intentID, depositTxHash, solveTxHash, settleTxHash)
+}
+
+// notifyRelayerComplete POSTs the completed status to the relayer so FE can read it from one place.
+func (s *Solver) notifyRelayerComplete(sourceChainID, intentID, depositTxHash, solveTxHash, settleTxHash string) {
+	if s.cfg.RelayerURL == "" {
+		return
+	}
+	adminKey := os.Getenv("ADMIN_API_KEY")
+	if adminKey == "" {
+		return
+	}
+
+	payload := map[string]string{
+		"sourceChainId": sourceChainID,
+		"intentId":      intentID,
+		"depositTxHash": depositTxHash,
+		"solveTxHash":   solveTxHash,
+		"settleTxHash":  settleTxHash,
+	}
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequest(http.MethodPost, s.cfg.RelayerURL+"/admin/transactions/complete", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", adminKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.WithError(err).WithField("intentID", intentID).Warn("Failed to notify relayer of completed transaction")
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		log.WithFields(log.Fields{"intentID": intentID, "status": resp.StatusCode, "body": string(b)}).
+			Warn("Relayer rejected completed transaction notification")
 	}
 }
 

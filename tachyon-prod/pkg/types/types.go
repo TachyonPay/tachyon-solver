@@ -366,6 +366,28 @@ type TransactionPageResponse struct {
 	Error        string               `json:"error,omitempty"`
 }
 
+// CreateTransactionRequest is sent by the FE to record a pending intent immediately.
+type CreateTransactionRequest struct {
+	IntentID        string `json:"intentId" binding:"required"`
+	UserAddress     string `json:"userAddress" binding:"required"`
+	SourceChainID   string `json:"sourceChainId" binding:"required"`
+	DestChainID     string `json:"destChainId" binding:"required"`
+	TokenA          string `json:"tokenA" binding:"required"`
+	TokenB          string `json:"tokenB" binding:"required"`
+	AmountA         string `json:"amountA" binding:"required"`
+	ExpectedAmountB string `json:"expectedAmountB" binding:"required"`
+	DepositTxHash   string `json:"depositTxHash,omitempty"`
+}
+
+// CompleteTransactionRequest is sent by the solver after settling to mark the record completed.
+type CompleteTransactionRequest struct {
+	SourceChainID string `json:"sourceChainId" binding:"required"`
+	IntentID      string `json:"intentId" binding:"required"`
+	DepositTxHash string `json:"depositTxHash,omitempty"`
+	SolveTxHash   string `json:"solveTxHash,omitempty"`
+	SettleTxHash  string `json:"settleTxHash,omitempty"`
+}
+
 // RelayBatchItem is a single Safe transaction inside a POST /recipient/relay-batch request.
 // The caller pre-signs the SafeTxHash (identical to relay-proxy) for each Safe independently.
 // All items in a request must target the same chainId.

@@ -205,6 +205,49 @@ func (r *Relayer) StoreRecipients(req *types.StoreRecipientsRequest) error {
 	return nil
 }
 
+// CreatePendingTransaction records a pending TransactionRecord. Idempotent: no-op if already exists.
+func (r *Relayer) CreatePendingTransaction(record *types.TransactionRecord) error {
+	existing, _ := r.store.GetTransactionRecord(record.SourceChainID, record.IntentID)
+	if existing != nil {
+		return nil
+	}
+	now := time.Now()
+	record.Status = "pending"
+	record.CreatedAt = now
+	record.UpdatedAt = now
+	return r.store.SaveTransactionRecord(record)
+}
+
+// CompleteTransaction marks a TransactionRecord as completed with all tx hashes.
+func (r *Relayer) CompleteTransaction(sourceChainID, intentID, depositTxHash, solveTxHash, settleTxHash string) error {
+	record, err := r.store.GetTransactionRecord(sourceChainID, intentID)
+	if err != nil {
+		return fmt.Errorf("failed to load transaction record: %w", err)
+	}
+	if record == nil {
+		return fmt.Errorf("transaction record not found for %s/%s", sourceChainID, intentID)
+	}
+	now := time.Now()
+	record.Status = "completed"
+	if depositTxHash != "" {
+		record.DepositTxHash = depositTxHash
+	}
+	if solveTxHash != "" {
+		record.SolveTxHash = solveTxHash
+	}
+	if settleTxHash != "" {
+		record.SettleTxHash = settleTxHash
+	}
+	record.UpdatedAt = now
+	record.CompletedAt = &now
+	return r.store.SaveTransactionRecord(record)
+}
+
+// GetTransactionsByUser returns paginated transaction history for a user.
+func (r *Relayer) GetTransactionsByUser(userAddress, status string, page, limit int) ([]*types.TransactionRecord, int, error) {
+	return r.store.GetTransactionsByUser(userAddress, status, page, limit)
+}
+
 func (r *Relayer) GetRecipients(intentID string) (*types.RecipientInfo, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
