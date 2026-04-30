@@ -7,12 +7,13 @@ import (
 
 // NetworkConfig defines blockchain network configuration
 type NetworkConfig struct {
-	Name          string
-	RpcURL        string
-	ChainID       *big.Int
-	BridgeAddress string
-	Explorer      string
-	SafeAddress   string // optional: Gnosis Safe holding liquidity on this chain
+	Name             string
+	RpcURL           string
+	ChainID          *big.Int
+	BridgeAddress    string
+	Explorer         string
+	SafeAddress      string // optional: Gnosis Safe holding liquidity on this chain
+	Multicall3Address string // optional: Multicall3 contract address for relay-batch; defaults to canonical 0xcA11...
 }
 
 // ChainPair represents a source-destination chain pair configuration
@@ -363,4 +364,32 @@ type TransactionPageResponse struct {
 	Total        int                  `json:"total"`
 	TotalPages   int                  `json:"totalPages"`
 	Error        string               `json:"error,omitempty"`
+}
+
+// RelayBatchItem is a single Safe transaction inside a POST /recipient/relay-batch request.
+// The caller pre-signs the SafeTxHash (identical to relay-proxy) for each Safe independently.
+// All items in a request must target the same chainId.
+type RelayBatchItem struct {
+	SafeAddress string `json:"safeAddress" binding:"required"`
+	ChainID     string `json:"chainId" binding:"required"`
+	To          string `json:"to" binding:"required"`
+	Value       string `json:"value"`     // wei string, default "0"
+	Data        string `json:"data"`      // hex-encoded calldata, default "0x"
+	Operation   uint8  `json:"operation"` // 0=Call, 1=DelegateCall
+	Signature   string `json:"signature" binding:"required"` // 65-byte sig over Safe tx hash
+}
+
+// RelayBatchRequest is the body for POST /recipient/relay-batch.
+// Encodes all execTransaction calls into one Multicall3.aggregate3 transaction.
+// AllowFailure controls atomicity: false (default) = all-or-nothing; true = best-effort.
+type RelayBatchRequest struct {
+	Items        []RelayBatchItem `json:"items" binding:"required"`
+	AllowFailure bool             `json:"allowFailure"` // default false = atomic
+}
+
+// RelayBatchResponse is returned after the batch is submitted on-chain.
+type RelayBatchResponse struct {
+	Success bool   `json:"success"`
+	TxHash  string `json:"txHash,omitempty"`
+	Error   string `json:"error,omitempty"`
 }

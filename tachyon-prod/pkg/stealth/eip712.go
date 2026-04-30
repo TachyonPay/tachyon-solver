@@ -27,6 +27,7 @@ var (
 	GetStealthAddressesTypeHash = crypto.Keccak256Hash([]byte("GetStealthAddresses(address signer)"))
 	DeriveStealthKeyTypeHash    = crypto.Keccak256Hash([]byte("DeriveStealthKey(address recipientAddress,address stealthAddress)"))
 	DeploySafeTypeHash          = crypto.Keccak256Hash([]byte("DeploySafe(address stealthAddress,uint256 chainId)"))
+	AuthSessionTypeHash         = crypto.Keccak256Hash([]byte("AuthSession(uint256 timestamp)"))
 )
 
 func init() {
@@ -136,6 +137,34 @@ func VerifyDeriveStealthKey(expectedAddr common.Address, recipientAddress, steal
 func VerifyDeploySafe(expectedAddr common.Address, stealthAddress common.Address, chainId *big.Int, signature []byte) bool {
 	digest := hashTypedData(hashDeploySafe(stealthAddress, chainId))
 	return verifySig(expectedAddr, digest, signature)
+}
+
+func hashAuthSession(timestamp *big.Int) common.Hash {
+	return crypto.Keccak256Hash(
+		AuthSessionTypeHash.Bytes(),
+		common.LeftPadBytes(timestamp.Bytes(), 32),
+	)
+}
+
+// RecoverAuthSession recovers the signer address from an EIP-712 AuthSession signature.
+// The client signs AuthSession(uint256 timestamp) under the TachyonStealth v1 domain.
+func RecoverAuthSession(signature []byte, timestamp int64) (common.Address, error) {
+	digest := hashTypedData(hashAuthSession(big.NewInt(timestamp)))
+
+	if len(signature) != 65 {
+		return common.Address{}, fmt.Errorf("invalid signature length: %d", len(signature))
+	}
+	sigCopy := make([]byte, 65)
+	copy(sigCopy, signature)
+	if sigCopy[64] >= 27 {
+		sigCopy[64] -= 27
+	}
+
+	pubKey, err := crypto.SigToPub(digest.Bytes(), sigCopy)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("could not recover signer: %w", err)
+	}
+	return crypto.PubkeyToAddress(*pubKey), nil
 }
 
 // verifySig recovers the signer from a 65-byte signature and compares to expected address

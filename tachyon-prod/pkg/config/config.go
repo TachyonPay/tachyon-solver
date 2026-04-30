@@ -85,13 +85,21 @@ func LoadConfig() (*Config, error) {
 			return nil, fmt.Errorf("invalid %sSAFE_ADDRESS: %s", prefix, safeAddr)
 		}
 
+		// Multicall3 address: canonical address works on most EVM chains; override per chain if needed.
+		// Set CHAIN_i_MULTICALL3 to the chain-specific address (e.g. Horizen testnet).
+		multicall3Addr := getEnv(prefix+"MULTICALL3", "0xcA11bde05977b3631167028862bE2a173976CA11")
+		if multicall3Addr != "" && !common.IsHexAddress(multicall3Addr) {
+			return nil, fmt.Errorf("invalid %sMULTICALL3 address: %s", prefix, multicall3Addr)
+		}
+
 		chainConfig := types.NetworkConfig{
-			Name:          getEnv(prefix+"NAME", fmt.Sprintf("chain-%s", chainIDStr)),
-			RpcURL:        rpcURL,
-			ChainID:       chainID,
-			BridgeAddress: bridgeAddr,
-			Explorer:      getEnv(prefix+"EXPLORER", ""),
-			SafeAddress:   safeAddr,
+			Name:              getEnv(prefix+"NAME", fmt.Sprintf("chain-%s", chainIDStr)),
+			RpcURL:            rpcURL,
+			ChainID:           chainID,
+			BridgeAddress:     bridgeAddr,
+			Explorer:          getEnv(prefix+"EXPLORER", ""),
+			SafeAddress:       safeAddr,
+			Multicall3Address: multicall3Addr,
 		}
 
 		// Use chain ID as the map key

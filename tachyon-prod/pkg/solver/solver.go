@@ -74,6 +74,7 @@ func NewSolver(cfg *config.Config) (*Solver, error) {
 			chainCfg.Name,
 			chainCfg.SafeAddress,
 			cfg.SafeSignerKeys,
+			chainCfg.Multicall3Address,
 		)
 		if err != nil {
 			store.Close()
@@ -1413,7 +1414,7 @@ func (s *Solver) settleIntent(ctx context.Context, network string, chain1IntentI
 			if settleTxHash == "" {
 				settleTxHash = settleResp.TransactionHash
 			}
-			s.completeTransactionRecord(chain1IntentID.String(), depositTxHash, solveTxHash, settleTxHash)
+			s.completeTransactionRecord(network, chain1IntentID.String(), depositTxHash, solveTxHash, settleTxHash)
 
 			// Update status
 			key := fmt.Sprintf("%s-%s", network, chain1IntentID.String())
@@ -1480,9 +1481,9 @@ func (s *Solver) persistLastProcessedBlock(networkKey string, blockNum *big.Int)
 }
 
 // saveTransactionRecord writes a new "pending" transaction record for a detected intent.
-// Skips silently if a record already exists for this intent ID.
+// Skips silently if a record already exists for this sourceChainID+intentID pair.
 func (s *Solver) saveTransactionRecord(intent *types.Intent, networkKey string) {
-	if existing, _ := s.store.GetTransactionRecord(intent.IntentID.String()); existing != nil {
+	if existing, _ := s.store.GetTransactionRecord(networkKey, intent.IntentID.String()); existing != nil {
 		return
 	}
 	now := time.Now()
@@ -1505,8 +1506,8 @@ func (s *Solver) saveTransactionRecord(intent *types.Intent, networkKey string) 
 }
 
 // completeTransactionRecord marks a transaction record as completed and attaches all tx hashes.
-func (s *Solver) completeTransactionRecord(intentID, depositTxHash, solveTxHash, settleTxHash string) {
-	record, err := s.store.GetTransactionRecord(intentID)
+func (s *Solver) completeTransactionRecord(sourceChainID, intentID, depositTxHash, solveTxHash, settleTxHash string) {
+	record, err := s.store.GetTransactionRecord(sourceChainID, intentID)
 	if err != nil || record == nil {
 		return
 	}

@@ -288,15 +288,16 @@ func (s *Store) GetRecipientByStealthAddress(stealthAddress string) (string, err
 
 // Transaction History Storage
 
-// SaveTransactionRecord saves or updates a transaction record keyed by intentID
+// SaveTransactionRecord saves or updates a transaction record keyed by sourceChainID+intentID.
+// Using a composite key prevents collisions when two chains both have intent ID N.
 func (s *Store) SaveTransactionRecord(record *types.TransactionRecord) error {
-	key := fmt.Sprintf("%s%s", PrefixTxHistory, record.IntentID)
+	key := fmt.Sprintf("%s%s-%s", PrefixTxHistory, record.SourceChainID, record.IntentID)
 	return s.PutJSON(key, record)
 }
 
-// GetTransactionRecord retrieves a transaction record by intent ID
-func (s *Store) GetTransactionRecord(intentID string) (*types.TransactionRecord, error) {
-	key := fmt.Sprintf("%s%s", PrefixTxHistory, intentID)
+// GetTransactionRecord retrieves a transaction record by source chain ID and intent ID.
+func (s *Store) GetTransactionRecord(sourceChainID, intentID string) (*types.TransactionRecord, error) {
+	key := fmt.Sprintf("%s%s-%s", PrefixTxHistory, sourceChainID, intentID)
 	var record types.TransactionRecord
 	if err := s.GetJSON(key, &record); err != nil {
 		if err == pebble.ErrNotFound {
