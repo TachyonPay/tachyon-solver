@@ -1569,10 +1569,25 @@ var binancePairs = map[string]string{
 	"ETH":  "ETHUSDT",
 }
 
+// symbolAliases maps on-chain ERC20 symbols to the canonical ticker the
+// public oracles know. Bridged variants like USDC.e are 1:1 with their
+// underlying so we look up the underlying's price.
+var symbolAliases = map[string]string{
+	"USDC.E":   "USDC",
+	"USDC.e":   "USDC",
+	"USDBC":    "USDC", // legacy Base USDC
+	"WETH":     "ETH",
+	"WBTC":     "BTC",
+	"CBBTC":    "BTC",
+}
+
 // FetchConsensusPrice queries up to four APIs in parallel and returns the median
 // USD price rounded to two decimal places. Requires at least two sources to agree.
 func (o *priceOracle) FetchConsensusPrice(symbol string) (float64, error) {
 	upper := strings.ToUpper(symbol)
+	if alias, ok := symbolAliases[upper]; ok {
+		upper = alias
+	}
 
 	type result struct {
 		source string

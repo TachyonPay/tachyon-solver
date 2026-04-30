@@ -124,7 +124,7 @@ func aerodromeSwapUSDCWETH(ctx context.Context, s Signer, srcToken, dstToken Tok
 	deadline := big.NewInt(time.Now().Unix() + 600) // 10 min
 
 	data, err := aerodromeRouterABI.Pack("swapExactTokensForTokens",
-		amountIn, amountOutMin, routes, s.Address(), deadline)
+		amountIn, amountOutMin, routes, s.AddressOnChain(ChainIDBase), deadline)
 	if err != nil {
 		return "", fmt.Errorf("pack swap: %w", err)
 	}

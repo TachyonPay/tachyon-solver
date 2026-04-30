@@ -5,6 +5,8 @@ package rebalancer
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"fmt"
 	"math/big"
 	"os"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	log "github.com/sirupsen/logrus"
 	"github.com/zk-tachyon/tachyon-prod/pkg/blockchain"
 )
@@ -65,17 +68,44 @@ func TestRebalancerE2E(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	// Build per-chain clients. The contract addresses passed here are the
-	// solver's bridge contracts; rebalancer doesn't actually call them, but
-	// blockchain.NewClient requires a non-empty contract addr.
+	// In Safe-via-relayer mode (REBALANCER_USE_SAFE=1) we wire each chain's
+	// Safe address + signing key onto the blockchain.Client so SafeSigner can
+	// sign Safe transactions locally before posting to the relayer.
+	useSafe := os.Getenv("REBALANCER_USE_SAFE") == "true" || os.Getenv("REBALANCER_USE_SAFE") == "1"
+	var baseSafeAddr, hzSafeAddr string
+	var safeKeys []*ecdsa.PrivateKey
+	if useSafe {
+		baseSafeAddr = strings.TrimSpace(os.Getenv("CHAIN_4_SAFE_ADDRESS"))
+		hzSafeAddr = strings.TrimSpace(os.Getenv("CHAIN_3_SAFE_ADDRESS"))
+		if baseSafeAddr == "" || hzSafeAddr == "" {
+			t.Fatal("REBALANCER_USE_SAFE=1 but CHAIN_3_SAFE_ADDRESS / CHAIN_4_SAFE_ADDRESS not set")
+		}
+		for i := 1; i <= 3; i++ {
+			h := strings.TrimPrefix(os.Getenv(fmt.Sprintf("SAFE_SIGNER_KEY_%d", i)), "0x")
+			if h == "" {
+				continue
+			}
+			k, err := crypto.HexToECDSA(h)
+			if err != nil {
+				t.Fatalf("invalid SAFE_SIGNER_KEY_%d: %v", i, err)
+			}
+			safeKeys = append(safeKeys, k)
+		}
+		if len(safeKeys) == 0 {
+			t.Fatal("REBALANCER_USE_SAFE=1 but no SAFE_SIGNER_KEY_* set")
+		}
+		t.Logf("Safe mode: base=%s horizen=%s, %d signing key(s)", baseSafeAddr, hzSafeAddr, len(safeKeys))
+	}
+
 	baseClient, err := blockchain.NewClient(
 		baseRPC,
-		"0x52F77B624a9f20d41a60eF550e5792a00747262c", // Base mainnet bridge
+		"0x52F77B624a9f20d41a60eF550e5792a00747262c",
 		pk,
 		new(big.Int).SetUint64(8453),
 		"base_mainnet",
-		"", // no Safe — use raw EOA
-		nil,
+		baseSafeAddr,
+		safeKeys,
+		"",
 	)
 	if err != nil {
 		t.Fatalf("base client: %v", err)
@@ -84,12 +114,13 @@ func TestRebalancerE2E(t *testing.T) {
 
 	hzClient, err := blockchain.NewClient(
 		hzRPC,
-		"0x1809703DE921177cca0f1c80FB58D788E09AdDB4", // Horizen mainnet bridge
+		"0x1809703DE921177cca0f1c80FB58D788E09AdDB4",
 		pk,
 		new(big.Int).SetUint64(26514),
 		"horizen_mainnet",
+		hzSafeAddr,
+		safeKeys,
 		"",
-		nil,
 	)
 	if err != nil {
 		t.Fatalf("horizen client: %v", err)
@@ -124,15 +155,32 @@ func TestRebalancerE2E(t *testing.T) {
 
 	rb := New(cfg, clients)
 
-	// Wire the EOA signer as a Quoter even for dry-run, so bridge legs
-	// that fund a swap show live-priced amounts in the plan.
-	if quoterPK := strings.TrimPrefix(pk, "0x"); quoterPK != "" {
-		os.Setenv("REBALANCER_TEST_PRIVATE_KEY", quoterPK)
-		if signerForQuote, err := NewEOASignerFromEnv(clients); err == nil && signerForQuote != nil {
-			rb.SetQuoter(signerForQuote)
-			t.Log("Quoter wired (live Aerodrome quotes for bridge sizing)")
+	// In Safe mode, the SafeSigner doubles as Quoter (read-only QuoteIn).
+	// In EOA mode we wire an EOASigner derived from PRIVATE_KEY.
+	var quoter Quoter
+	if useSafe {
+		ss, err := NewSafeSignerFromClients(clients)
+		if err != nil {
+			t.Fatalf("safe signer: %v", err)
+		}
+		if ss == nil {
+			t.Fatal("safe signer is nil")
+		}
+		quoter = ss
+		rb.SetQuoter(ss)
+		t.Logf("Quoter wired via SafeSigner (Safe@Base=%s Safe@Horizen=%s, relayer=%s)",
+			baseSafeAddr, hzSafeAddr, RelayerURL())
+	} else {
+		if quoterPK := strings.TrimPrefix(pk, "0x"); quoterPK != "" {
+			os.Setenv("REBALANCER_TEST_PRIVATE_KEY", quoterPK)
+			if signerForQuote, err := NewEOASignerFromEnv(clients); err == nil && signerForQuote != nil {
+				quoter = signerForQuote
+				rb.SetQuoter(signerForQuote)
+				t.Log("Quoter wired via EOASigner (live Aerodrome quotes)")
+			}
 		}
 	}
+	_ = quoter // referenced below in execute path
 
 	// Always run dry-run first to print the plan.
 	snap, plan, err := rb.DryRun(ctx)
@@ -166,19 +214,30 @@ func TestRebalancerE2E(t *testing.T) {
 		return
 	}
 
-	// Wire the EOA executor (uses the same private key, since user requested
-	// reusing the AWS key for this test).
-	os.Setenv("REBALANCER_TEST_PRIVATE_KEY", pk)
-	signer, err := NewEOASignerFromEnv(clients)
-	if err != nil {
-		t.Fatalf("eoa signer: %v", err)
+	// Wire the executor. Safe mode reuses the SafeSigner already constructed
+	// above (which posts to the relayer); EOA mode uses a fresh EOASigner.
+	var signerAddress string
+	if useSafe {
+		safeSigner, err := NewSafeSignerFromClients(clients)
+		if err != nil {
+			t.Fatalf("safe signer: %v", err)
+		}
+		rb.SetExecutor(NewSafeExecutor(safeSigner, cfg))
+		signerAddress = safeSigner.Address().Hex() + " (Safe via relayer " + RelayerURL() + ")"
+	} else {
+		os.Setenv("REBALANCER_TEST_PRIVATE_KEY", pk)
+		signer, err := NewEOASignerFromEnv(clients)
+		if err != nil {
+			t.Fatalf("eoa signer: %v", err)
+		}
+		if signer == nil {
+			t.Fatal("eoa signer is nil despite REBALANCER_TEST_PRIVATE_KEY being set")
+		}
+		rb.SetExecutor(NewEOAExecutor(signer, cfg))
+		signerAddress = signer.Address().Hex() + " (EOA)"
 	}
-	if signer == nil {
-		t.Fatal("eoa signer is nil despite REBALANCER_TEST_PRIVATE_KEY being set")
-	}
-	rb.SetExecutor(NewEOAExecutor(signer, cfg))
 
-	t.Logf("=== Executing %d action(s) with %s ===", len(plan.Actions), signer.Address().Hex())
+	t.Logf("=== Executing %d action(s) with %s ===", len(plan.Actions), signerAddress)
 
 	snap2, plan2, txs, err := rb.Execute(ctx)
 	for i, h := range txs {

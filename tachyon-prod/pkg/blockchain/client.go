@@ -709,7 +709,15 @@ func (c *Client) RelaySafeTransaction(ctx context.Context, safeAddr common.Addre
 	if err != nil {
 		return nil, err
 	}
-	auth.GasLimit = uint64(300000)
+	// Forward the inner call's `value` as the outer msg.value, so the relayer
+	// prefunds it and the Safe stays net-zero on native gas. Without this the
+	// Safe must hold ETH/ZEN itself to cover bridge LZ messaging fees.
+	if value != nil && value.Sign() > 0 {
+		auth.Value = new(big.Int).Set(value)
+	}
+	// Bridge inner calls (Stargate / OFT send) consume ~400-500k gas; swaps
+	// and approves are well under. 600k is a safe ceiling.
+	auth.GasLimit = uint64(600000)
 
 	tx, err := safe.Transact(auth, "execTransaction",
 		to, value, data, operation,
@@ -728,6 +736,78 @@ func (c *Client) RelaySafeTransaction(ctx context.Context, safeAddr common.Addre
 	}).Info("Safe transaction relayed")
 
 	return tx, nil
+}
+
+// SignSafeTransaction computes the SafeTxHash for (to, value, data, operation)
+// against this client's Safe and signs it with every key in c.safeSigningKeys.
+// Returns the concatenated 65*N-byte signature, sorted by signer address
+// ascending — exactly the format Gnosis Safe expects in execTransaction.
+//
+// Used by callers that want to broadcast the resulting tx through a SEPARATE
+// service (e.g. the relayer's RelayProxy endpoint) instead of submitting from
+// this client's EOA.
+func (c *Client) SignSafeTransaction(ctx context.Context, to common.Address, value *big.Int, data []byte, operation uint8) ([]byte, error) {
+	if !c.HasSafe() {
+		return nil, fmt.Errorf("no Safe address configured for this client")
+	}
+	if len(c.safeSigningKeys) == 0 {
+		return nil, fmt.Errorf("no Safe signing keys configured — set SAFE_SIGNER_KEY_1/2/3")
+	}
+	if value == nil {
+		value = big.NewInt(0)
+	}
+
+	safeABI, err := abi.JSON(strings.NewReader(safeExecABI))
+	if err != nil {
+		return nil, fmt.Errorf("parse safe ABI: %w", err)
+	}
+	safe := bind.NewBoundContract(c.safeAddress, safeABI, c.ethClient, c.ethClient, c.ethClient)
+
+	var nonceResult []interface{}
+	if err := safe.Call(&bind.CallOpts{Context: ctx}, &nonceResult, "nonce"); err != nil {
+		return nil, fmt.Errorf("get safe nonce: %w", err)
+	}
+	safeNonce := nonceResult[0].(*big.Int)
+
+	var hashResult []interface{}
+	if err := safe.Call(&bind.CallOpts{Context: ctx}, &hashResult, "getTransactionHash",
+		to, value, data, operation,
+		big.NewInt(0), big.NewInt(0), big.NewInt(0),
+		common.Address{}, common.Address{},
+		safeNonce,
+	); err != nil {
+		return nil, fmt.Errorf("get transaction hash: %w", err)
+	}
+	txHash := hashResult[0].([32]byte)
+
+	type sigEntry struct {
+		addr common.Address
+		sig  [65]byte
+	}
+	entries := make([]sigEntry, 0, len(c.safeSigningKeys))
+	for i, key := range c.safeSigningKeys {
+		raw, err := crypto.Sign(txHash[:], key)
+		if err != nil {
+			return nil, fmt.Errorf("sign with TEE key %d: %w", i+1, err)
+		}
+		if raw[64] < 27 {
+			raw[64] += 27
+		}
+		var s [65]byte
+		copy(s[:], raw)
+		entries = append(entries, sigEntry{
+			addr: crypto.PubkeyToAddress(key.PublicKey),
+			sig:  s,
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return bytes.Compare(entries[i].addr.Bytes(), entries[j].addr.Bytes()) < 0
+	})
+	allSigs := make([]byte, 0, len(entries)*65)
+	for _, e := range entries {
+		allSigs = append(allSigs, e.sig[:]...)
+	}
+	return allSigs, nil
 }
 
 // multicall3ABI is the minimal ABI for Multicall3.aggregate3.

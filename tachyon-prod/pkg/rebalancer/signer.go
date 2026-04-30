@@ -72,6 +72,10 @@ func NewEOASignerFromEnv(clients map[string]*blockchain.Client) (*EOASigner, err
 // Address returns the EOA's address.
 func (s *EOASigner) Address() common.Address { return s.address }
 
+// AddressOnChain returns the same EOA address regardless of chain — EOA is
+// global by definition.
+func (s *EOASigner) AddressOnChain(chainID string) common.Address { return s.address }
+
 // chain looks up the chain context or returns a friendly error.
 func (s *EOASigner) chain(chainID string) (chainCtx, error) {
 	cc, ok := s.chains[chainID]

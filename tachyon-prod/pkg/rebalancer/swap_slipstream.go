@@ -84,7 +84,7 @@ type slipstreamExactInputParams struct {
 func slipstreamExactInput(ctx context.Context, s Signer, path []byte, amountIn, amountOutMin *big.Int) (string, error) {
 	params := slipstreamExactInputParams{
 		Path:             path,
-		Recipient:        s.Address(),
+		Recipient:        s.AddressOnChain(ChainIDBase),
 		Deadline:         big.NewInt(time.Now().Unix() + 600),
 		AmountIn:         amountIn,
 		AmountOutMinimum: amountOutMin,

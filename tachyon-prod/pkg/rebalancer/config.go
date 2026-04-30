@@ -114,6 +114,24 @@ func UseSafe() bool {
 	return getBool("REBALANCER_USE_SAFE", false)
 }
 
+// RelayerURL returns the relayer base URL for SafeSigner submissions.
+// In Safe mode the rebalancer signs Safe transactions locally and POSTs them
+// to /recipient/relay-proxy on the relayer; the relayer pays gas and forwards
+// any inner-call native value as msg.value (so the Safe doesn't need to hold
+// ETH/ZEN for bridge fees).
+//
+// Defaults to http://localhost:3000 — the same default RELAYER_URL the
+// solver uses.
+func RelayerURL() string {
+	if v := os.Getenv("REBALANCER_RELAYER_URL"); v != "" {
+		return v
+	}
+	if v := os.Getenv("RELAYER_URL"); v != "" {
+		return v
+	}
+	return "http://localhost:3000"
+}
+
 // helpers ---
 
 func getBool(key string, def bool) bool {

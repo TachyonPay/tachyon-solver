@@ -1,9 +1,14 @@
 package rebalancer
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
+	"net/http"
 	"sync"
 	"time"
 
@@ -15,26 +20,58 @@ import (
 )
 
 // SafeSigner is the production Signer that issues every transaction through
-// the solver's Gnosis Safe. The funds and approvals live on the Safe; a
-// separate gas-paying EOA (already configured for the solver via PRIVATE_KEY)
-// submits the wrapping execTransaction call.
+// the solver's Gnosis Safe. The funds (and the Safe) live on-chain; the actual
+// gas-paying EOA submission is delegated to the relayer service.
+//
+// Per-transaction flow:
+//
+//  1. SafeSigner asks `blockchain.Client.SignSafeTransaction` to compute the
+//     SafeTxHash and produce the concatenated owner signature(s).
+//  2. SafeSigner POSTs (safeAddr, chainId, to, value, data, op, sig) to the
+//     relayer's /recipient/relay-proxy endpoint.
+//  3. The relayer submits execTransaction from its own EOA, forwarding the
+//     inner value as msg.value (so the Safe doesn't need to hold ETH/ZEN
+//     long-term — it only needs the rebalanced tokens).
+//  4. SafeSigner fetches the resulting tx from chain by hash and returns it.
 //
 // Each chain's blockchain.Client must already have:
-//   - SAFE_ADDRESS set (chain has a Safe wired)
-//   - SAFE_SIGNER_KEY_1/2/3 loaded (3-of-N TEE signers)
-//   - PRIVATE_KEY set (gas-paying EOA, separate from Safe owners)
+//   - SAFE_ADDRESS set
+//   - SAFE_SIGNER_KEY_1/2/3 loaded
 //
-// SafeSigner serializes per-chain submissions behind a mutex to avoid
-// nonce races on the Safe (Safe nonce is monotonic).
+// SafeSigner serializes per-chain submissions behind a mutex to avoid Safe
+// nonce races within the rebalancer. The relayer's own queue may interleave
+// other Safe ops on the same Safe — operators should not run multiple
+// rebalancer instances against the same Safe concurrently.
 type SafeSigner struct {
-	clients map[string]*blockchain.Client
-	address common.Address // the Safe address (same on all chains via CREATE2)
-	mu      map[string]*sync.Mutex
+	clients    map[string]*blockchain.Client
+	address    common.Address
+	mu         map[string]*sync.Mutex
+	relayerURL string
+	httpClient *http.Client
 }
 
-// NewSafeSignerFromClients builds a SafeSigner from per-chain blockchain.Clients
-// that have Safes wired. Returns an error if any client doesn't have a Safe
-// configured. Returns (nil, nil) if `clients` is empty.
+// relayProxyRequest mirrors types.RelayProxyRequest to avoid an import cycle.
+type relayProxyRequest struct {
+	SafeAddress string `json:"safeAddress"`
+	ChainID     string `json:"chainId"`
+	To          string `json:"to"`
+	Value       string `json:"value,omitempty"`
+	Data        string `json:"data,omitempty"`
+	Operation   uint8  `json:"operation"`
+	Signature   string `json:"signature"`
+}
+
+type relayProxyResponse struct {
+	Success bool   `json:"success"`
+	TxHash  string `json:"txHash"`
+	Error   string `json:"error"`
+}
+
+// NewSafeSignerFromClients builds a SafeSigner using the given chain clients
+// and the relayer URL from config (REBALANCER_RELAYER_URL, falling back to
+// RELAYER_URL, then http://localhost:3000).
+//
+// Returns (nil, nil) if `clients` is empty.
 func NewSafeSignerFromClients(clients map[string]*blockchain.Client) (*SafeSigner, error) {
 	if len(clients) == 0 {
 		return nil, nil
@@ -49,8 +86,6 @@ func NewSafeSignerFromClients(clients map[string]*blockchain.Client) (*SafeSigne
 		if safe == (common.Address{}) {
 			safe = addr
 		} else if safe != addr {
-			// Safe addresses differ across chains. This is allowed (different
-			// Safes per chain), but flag it for visibility.
 			log.WithFields(log.Fields{
 				"chain1Safe": safe.Hex(),
 				"chain2Safe": addr.Hex(),
@@ -59,24 +94,49 @@ func NewSafeSignerFromClients(clients map[string]*blockchain.Client) (*SafeSigne
 		mus[chainID] = &sync.Mutex{}
 	}
 
-	log.WithFields(log.Fields{
-		"address": safe.Hex(),
-		"chains":  len(clients),
-	}).Info("Rebalancer Safe signer initialized")
+	relayerURL := RelayerURL()
 
-	return &SafeSigner{clients: clients, address: safe, mu: mus}, nil
+	log.WithFields(log.Fields{
+		"address":    safe.Hex(),
+		"chains":     len(clients),
+		"relayerURL": relayerURL,
+	}).Info("Rebalancer Safe signer initialized (relayer-mediated)")
+
+	return &SafeSigner{
+		clients:    clients,
+		address:    safe,
+		mu:         mus,
+		relayerURL: relayerURL,
+		httpClient: &http.Client{Timeout: 60 * time.Second},
+	}, nil
 }
 
-// Address returns the Safe address.
+// Address returns one of the per-chain Safe addresses. Most callers should
+// prefer AddressOnChain since Safe addresses can differ between chains
+// (different proxy factories on Base vs Horizen).
 func (s *SafeSigner) Address() common.Address { return s.address }
 
-// SendTx wraps the call as a Safe execTransaction signed by the configured
-// TEE keys, submitted by the gas-paying EOA. value > 0 requires the Safe to
-// hold native gas on this chain (ETH on Base, ZEN on Horizen).
+// AddressOnChain returns the Safe address on the given chain. Different chains
+// may have Safes at different addresses when the underlying SafeProxyFactory
+// differs (e.g. Base uses canonical Safe, Horizen uses a custom deployment),
+// so balance reads, allowance checks, bridge recipients/refunds must use this
+// rather than Address().
+func (s *SafeSigner) AddressOnChain(chainID string) common.Address {
+	c, ok := s.clients[chainID]
+	if !ok {
+		// Fall back to the primary address; the caller will error elsewhere
+		// when the chain isn't actually configured.
+		return s.address
+	}
+	return c.GetSafeAddress()
+}
+
+// SendTx signs the inner call (to, value, data) as a Safe execTransaction,
+// POSTs the signed payload to the relayer, and returns the resulting tx after
+// fetching it from chain by hash.
 //
-// gasLimit is currently ignored (Safe's execTransaction has its own internal
-// gas accounting; the outer EOA tx is sized by ApproveTokenViaSafe-style
-// hardcoded limits). Kept in the signature for Signer-interface conformance.
+// gasLimit is currently ignored — the relayer manages its own outer gas. Kept
+// in the signature for Signer-interface conformance.
 func (s *SafeSigner) SendTx(ctx context.Context, chainID string, to common.Address, value *big.Int, data []byte, gasLimit uint64) (*types.Transaction, error) {
 	_ = gasLimit
 	c, ok := s.clients[chainID]
@@ -90,10 +150,72 @@ func (s *SafeSigner) SendTx(ctx context.Context, chainID string, to common.Addre
 	mu.Lock()
 	defer mu.Unlock()
 
-	if value == nil || value.Sign() == 0 {
-		return c.ExecuteViaSafe(ctx, to, data)
+	if value == nil {
+		value = big.NewInt(0)
 	}
-	return c.ExecuteViaSafeWithValue(ctx, to, value, data)
+
+	// Sign the Safe tx hash locally with the configured TEE key(s).
+	sig, err := c.SignSafeTransaction(ctx, to, value, data, 0)
+	if err != nil {
+		return nil, fmt.Errorf("sign safe tx: %w", err)
+	}
+
+	// POST to the relayer's RelayProxy endpoint. Use the per-chain Safe
+	// address (Safes can differ between chains).
+	body, _ := json.Marshal(relayProxyRequest{
+		SafeAddress: c.GetSafeAddress().Hex(),
+		ChainID:     chainID,
+		To:          to.Hex(),
+		Value:       value.String(),
+		Data:        "0x" + hex.EncodeToString(data),
+		Operation:   0, // Call
+		Signature:   "0x" + hex.EncodeToString(sig),
+	})
+
+	url := s.relayerURL + "/recipient/relay-proxy"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build relay-proxy request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("relay-proxy request: %w", err)
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(resp.Body)
+
+	var parsed relayProxyResponse
+	if err := json.Unmarshal(rb, &parsed); err != nil {
+		return nil, fmt.Errorf("parse relay-proxy response (%d): %s", resp.StatusCode, string(rb))
+	}
+	if !parsed.Success || parsed.TxHash == "" {
+		return nil, fmt.Errorf("relay-proxy refused (%d): %s", resp.StatusCode, parsed.Error)
+	}
+
+	log.WithFields(log.Fields{
+		"chain":  chainID,
+		"to":     to.Hex(),
+		"value":  value.String(),
+		"txHash": parsed.TxHash,
+	}).Info("Safe tx submitted via relayer")
+
+	// Fetch the tx from chain by hash so we have a real *types.Transaction
+	// for downstream WaitMined. Retry briefly to absorb propagation lag.
+	hash := common.HexToHash(parsed.TxHash)
+	for attempt := 0; attempt < 6; attempt++ {
+		tx, _, err := c.EthClient().TransactionByHash(ctx, hash)
+		if err == nil && tx != nil {
+			return tx, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return nil, fmt.Errorf("could not fetch tx %s by hash after relayer accepted it", parsed.TxHash)
 }
 
 // SendAndWait sends and blocks on bind.WaitMined.
@@ -121,19 +243,19 @@ func (s *SafeSigner) SendAndWait(ctx context.Context, chainID string, to common.
 	return tx, rcpt, nil
 }
 
-// CallReadOnly executes eth_call with msg.sender = Safe address.
-// Read-only operations don't need Safe wrapping; we just call directly.
+// CallReadOnly executes eth_call with msg.sender = Safe address ON THIS CHAIN.
+// Read-only operations don't touch the Safe; we just call directly.
 func (s *SafeSigner) CallReadOnly(ctx context.Context, chainID string, to common.Address, data []byte) ([]byte, error) {
 	c, ok := s.clients[chainID]
 	if !ok {
 		return nil, fmt.Errorf("no Safe client for chain %s", chainID)
 	}
-	msg := callMsgFromTx(s.address, to, big.NewInt(0), data)
+	msg := callMsgFromTx(c.GetSafeAddress(), to, big.NewInt(0), data)
 	return c.EthClient().CallContract(ctx, msg, nil)
 }
 
-// QuoteIn implements Quoter on SafeSigner — same logic as EOASigner since it's
-// just on-chain reads.
+// QuoteIn implements Quoter on SafeSigner — delegates to the shared free
+// function since it's just on-chain reads.
 func (s *SafeSigner) QuoteIn(ctx context.Context, chainID string, srcToken, dstToken TokenSym, amountOut *big.Int) (*big.Int, error) {
 	return quoteIn(ctx, s, chainID, srcToken, dstToken, amountOut)
 }
