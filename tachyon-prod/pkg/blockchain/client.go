@@ -119,6 +119,17 @@ func (c *Client) GetAddress() common.Address {
 	return c.address
 }
 
+// EthClient exposes the underlying RPC client. Used by auxiliary services
+// (rebalancer) that need to send transactions on this chain with a different key.
+func (c *Client) EthClient() *ethclient.Client {
+	return c.ethClient
+}
+
+// ChainID returns a copy of this client's chain id.
+func (c *Client) ChainID() *big.Int {
+	return new(big.Int).Set(c.chainID)
+}
+
 // GetBalance returns the token balance for the wallet.
 // If tokenAddress is zero, returns ETH balance; otherwise returns ERC20 balance.
 func (c *Client) GetBalance(ctx context.Context, tokenAddress common.Address) (*big.Int, error) {
@@ -721,11 +732,21 @@ func (c *Client) RelaySafeTransaction(ctx context.Context, safeAddr common.Addre
 //  5. Concatenates all 65-byte signatures and calls execTransaction.
 //     The EOA (c.address) pays gas; the Safe is msg.sender for the inner call.
 func (c *Client) ExecuteViaSafe(ctx context.Context, to common.Address, data []byte) (*types.Transaction, error) {
+	return c.ExecuteViaSafeWithValue(ctx, to, big.NewInt(0), data)
+}
+
+// ExecuteViaSafeWithValue is the value-aware variant. The Safe must hold enough
+// native gas (ETH on Base, ZEN on Horizen) to cover `value` for the inner call.
+// Used by the rebalancer to fund LayerZero / Stargate native fees from the Safe.
+func (c *Client) ExecuteViaSafeWithValue(ctx context.Context, to common.Address, value *big.Int, data []byte) (*types.Transaction, error) {
 	if !c.HasSafe() {
 		return nil, fmt.Errorf("no Safe address configured for this client")
 	}
 	if len(c.safeSigningKeys) == 0 {
 		return nil, fmt.Errorf("no Safe signing keys configured — set SAFE_SIGNER_KEY_1/2/3")
+	}
+	if value == nil {
+		value = big.NewInt(0)
 	}
 
 	safeABI, err := abi.JSON(strings.NewReader(safeExecABI))
@@ -744,7 +765,7 @@ func (c *Client) ExecuteViaSafe(ctx context.Context, to common.Address, data []b
 	// 2. Get the Safe tx hash (all gas params zero — EOA pays gas externally)
 	var hashResult []interface{}
 	if err := safe.Call(&bind.CallOpts{Context: ctx}, &hashResult, "getTransactionHash",
-		to, big.NewInt(0), data, uint8(0),
+		to, value, data, uint8(0),
 		big.NewInt(0), big.NewInt(0), big.NewInt(0),
 		common.Address{}, common.Address{},
 		safeNonce,
@@ -796,7 +817,7 @@ func (c *Client) ExecuteViaSafe(ctx context.Context, to common.Address, data []b
 	auth.GasLimit = uint64(400000)
 
 	tx, err := safe.Transact(auth, "execTransaction",
-		to, big.NewInt(0), data, uint8(0),
+		to, value, data, uint8(0),
 		big.NewInt(0), big.NewInt(0), big.NewInt(0),
 		common.Address{}, common.Address{},
 		allSigs,

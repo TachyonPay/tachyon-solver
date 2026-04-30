@@ -379,6 +379,13 @@ func (s *Solver) GetWalletAddress() string {
 	return ""
 }
 
+// Clients exposes the per-chain blockchain clients keyed by chain ID string.
+// Used by auxiliary services (rebalancer, monitoring) that need to issue calls
+// against the same RPC + Safe wiring the solver already owns.
+func (s *Solver) Clients() map[string]*blockchain.Client {
+	return s.clients
+}
+
 // GetBalances returns token balances for all networks
 func (s *Solver) GetBalances(ctx context.Context) map[string]string {
 	balances := make(map[string]string)
@@ -593,79 +600,83 @@ func (s *Solver) calculateProfitableBid(ctx context.Context, networkKey string, 
 	}
 
 	// --- 2. USD profitability check ---
-	symbolA, errA := sourceClient.GetTokenSymbol(ctx, tokenAAddr)
-
+	// Skip the intent if we can't resolve token symbols or fetch oracle prices
+	// for both legs. Without verified USD pricing we have no safe way to know
+	// the bid is actually profitable, so let the intent expire and allow the
+	// user to claim back their deposit.
 	destChainID := intent.DestChainId.String()
 	destClient, destExists := s.clients[destChainID]
-	var symbolB string
-	var errB error
-	if destExists {
-		symbolB, errB = destClient.GetTokenSymbol(ctx, common.HexToAddress(intent.TokenB))
-	} else {
-		errB = fmt.Errorf("destination chain %s not configured", destChainID)
+	if !destExists {
+		log.WithFields(log.Fields{
+			"intentID":    intent.IntentID.String(),
+			"destChainID": destChainID,
+		}).Info("Destination chain not configured, skipping intent")
+		return false, nil
 	}
 
-	if errA != nil || errB != nil {
+	tokenBAddr := common.HexToAddress(intent.TokenB)
+
+	symbolA, err := sourceClient.GetTokenSymbol(ctx, tokenAAddr)
+	if err != nil {
+		log.WithError(err).WithField("token", tokenAAddr.Hex()).Info("Could not resolve TokenA symbol, skipping intent")
+		return false, nil
+	}
+	symbolB, err := destClient.GetTokenSymbol(ctx, tokenBAddr)
+	if err != nil {
+		log.WithError(err).WithField("token", tokenBAddr.Hex()).Info("Could not resolve TokenB symbol, skipping intent")
+		return false, nil
+	}
+
+	priceA, err := s.oracle.FetchConsensusPrice(symbolA)
+	if err != nil {
+		log.WithError(err).WithField("symbol", symbolA).Info("Could not fetch TokenA price from oracles, skipping intent")
+		return false, nil
+	}
+	priceB, err := s.oracle.FetchConsensusPrice(symbolB)
+	if err != nil {
+		log.WithError(err).WithField("symbol", symbolB).Info("Could not fetch TokenB price from oracles, skipping intent")
+		return false, nil
+	}
+
+	decimalsA, err := sourceClient.GetTokenDecimals(ctx, tokenAAddr)
+	if err != nil {
+		decimalsA = 18
+	}
+	decimalsB, err := destClient.GetTokenDecimals(ctx, tokenBAddr)
+	if err != nil {
+		decimalsB = 18
+	}
+
+	// Solver net gain on source chain: amountA + reward - targetBid (= margin * minBid)
+	netGainA := new(big.Int).Sub(minBid, targetBid)
+	netGainAFloat, _ := new(big.Float).SetInt(netGainA).Float64()
+	gainUSD := (netGainAFloat / math.Pow(10, float64(decimalsA))) * priceA
+
+	// Cost of providing expectedAmountB of TokenB on dest chain
+	expectedBFloat, _ := new(big.Float).SetInt(intent.ExpectedAmountB).Float64()
+	costUSD := (expectedBFloat / math.Pow(10, float64(decimalsB))) * priceB
+
+	profitUSD := gainUSD - costUSD
+
+	log.WithFields(log.Fields{
+		"symbolA":   symbolA,
+		"symbolB":   symbolB,
+		"priceA":    priceA,
+		"priceB":    priceB,
+		"decimalsA": decimalsA,
+		"decimalsB": decimalsB,
+		"gainUSD":   gainUSD,
+		"costUSD":   costUSD,
+		"profitUSD": profitUSD,
+	}).Info("USD profitability analysis")
+
+	if profitUSD < 0 {
 		log.WithFields(log.Fields{
-			"tokenAErr": errA,
-			"tokenBErr": errB,
-		}).Debug("Could not resolve token symbols, skipping USD price check")
-	} else {
-		priceA, err := s.oracle.FetchConsensusPrice(symbolA)
-		if err != nil {
-			log.WithError(err).WithField("symbol", symbolA).Debug("Could not fetch TokenA price, skipping USD check")
-		} else {
-			priceB, err := s.oracle.FetchConsensusPrice(symbolB)
-			if err != nil {
-				log.WithError(err).WithField("symbol", symbolB).Debug("Could not fetch TokenB price, skipping USD check")
-			} else {
-				decimalsA, err := sourceClient.GetTokenDecimals(ctx, tokenAAddr)
-				if err != nil {
-					decimalsA = 18
-				}
-				var decimalsB uint8
-				if destExists {
-					decimalsB, err = destClient.GetTokenDecimals(ctx, common.HexToAddress(intent.TokenB))
-					if err != nil {
-						decimalsB = 18
-					}
-				} else {
-					decimalsB = 18
-				}
-
-				// Solver net gain on source chain: amountA + reward - targetBid (= margin * minBid)
-				netGainA := new(big.Int).Sub(minBid, targetBid)
-				netGainAFloat, _ := new(big.Float).SetInt(netGainA).Float64()
-				gainUSD := (netGainAFloat / math.Pow(10, float64(decimalsA))) * priceA
-
-				// Cost of providing expectedAmountB of TokenB on dest chain
-				expectedBFloat, _ := new(big.Float).SetInt(intent.ExpectedAmountB).Float64()
-				costUSD := (expectedBFloat / math.Pow(10, float64(decimalsB))) * priceB
-
-				profitUSD := gainUSD - costUSD
-
-				log.WithFields(log.Fields{
-					"symbolA":      symbolA,
-					"symbolB":      symbolB,
-					"priceA":       priceA,
-					"priceB":       priceB,
-					"decimalsA":    decimalsA,
-					"decimalsB":    decimalsB,
-					"gainUSD":      gainUSD,
-					"costUSD":      costUSD,
-					"profitUSD":    profitUSD,
-				}).Info("USD profitability analysis")
-
-				if profitUSD <= 0 {
-					log.WithFields(log.Fields{
-						"profitUSD": profitUSD,
-						"symbolA":   symbolA,
-						"symbolB":   symbolB,
-					}).Info("Intent not profitable in USD terms, skipping")
-					return false, nil
-				}
-			}
-		}
+			"profitUSD": profitUSD,
+			"symbolA":   symbolA,
+			"symbolB":   symbolB,
+		}).Info("Intent not profitable in USD terms, skipping")
+		return false, nil
 	}
 
 	// --- 3. Balance and max-bid guards ---
@@ -686,6 +697,30 @@ func (s *Solver) calculateProfitableBid(ctx context.Context, networkKey string, 
 			"maxAffordable": maxAffordableInt.String(),
 			"balance":       balance.String(),
 		}).Info("Cannot afford this intent")
+		return false, nil
+	}
+
+	// --- 4. Destination-chain TokenB balance guard ---
+	// Even if the source-side bid is profitable, skip the intent unless we hold
+	// enough TokenB on the destination chain to fulfill expectedAmountB.
+	destBalance, err := destClient.GetBalance(ctx, tokenBAddr)
+	if err != nil {
+		log.WithError(err).WithField("destChainID", destChainID).Error("Failed to get TokenB balance on dest chain")
+		return false, nil
+	}
+
+	destBalanceFloat := new(big.Float).SetInt(destBalance)
+	destMaxAffordableFloat := new(big.Float).Mul(destBalanceFloat, bufferFloat)
+	destMaxAffordable, _ := destMaxAffordableFloat.Int(nil)
+
+	if intent.ExpectedAmountB.Cmp(destMaxAffordable) > 0 {
+		log.WithFields(log.Fields{
+			"intentID":          intent.IntentID.String(),
+			"expectedAmountB":   intent.ExpectedAmountB.String(),
+			"destBalance":       destBalance.String(),
+			"destMaxAffordable": destMaxAffordable.String(),
+			"destChainID":       destChainID,
+		}).Info("Insufficient TokenB on destination chain to solve")
 		return false, nil
 	}
 
