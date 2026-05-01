@@ -802,181 +802,190 @@ func (s *Solver) startBiddingLoop(ctx context.Context, networkKey string, intent
 	currentBid := new(big.Int).Set(initialBid)
 	hasPlacedBid := false
 
+	// Fire once immediately so the first bid doesn't wait up to a full 10s
+	// ticker tick — short auctionDuration intents (~20s) need every second
+	// they can get. Subsequent iterations are gated by the ticker.
+	fire := make(chan struct{}, 1)
+	fire <- struct{}{}
+
 	for {
 		select {
 		case <-s.stopChan:
 			return
+		case <-fire:
+			fire = nil // nil chan never selects — later iterations only fire on ticker
 		case <-ticker.C:
-			intent, err := client.GetIntent(ctx, intentID)
-			if err != nil {
-				log.WithError(err).Error("Failed to get intent")
-				continue
-			}
+		}
 
-			if intent.Completed {
-				log.WithField("intentID", intentID).Debug("Intent completed")
-				return
-			}
+		intent, err := client.GetIntent(ctx, intentID)
+		if err != nil {
+			log.WithError(err).Error("Failed to get intent")
+			continue
+		}
 
-			currentTime := time.Now().Unix()
-			if big.NewInt(currentTime).Cmp(intent.EndTime) > 0 {
-				log.WithField("intentID", intentID).Debug("Auction ended")
+		if intent.Completed {
+			log.WithField("intentID", intentID).Debug("Intent completed")
+			return
+		}
 
-				if intent.WinningSolver == (common.Address{}.Hex()) {
-					log.WithField("intentID", intentID).Debug("Finalizing auction")
+		currentTime := time.Now().Unix()
+		if big.NewInt(currentTime).Cmp(intent.EndTime) > 0 {
+			log.WithField("intentID", intentID).Debug("Auction ended")
 
-					s.txMutexes[networkKey].Lock()
+			if intent.WinningSolver == (common.Address{}.Hex()) {
+				log.WithField("intentID", intentID).Debug("Finalizing auction")
 
-					tx, err := s.retryTransaction(ctx, networkKey, "finalize-auction", func() (*ethtypes.Transaction, error) {
-						return client.FinalizeAuction(ctx, intentID)
-					})
+				s.txMutexes[networkKey].Lock()
 
-					if err != nil {
-						s.txMutexes[networkKey].Unlock()
-						log.WithError(err).Warn("Failed to finalize auction after retries")
+				tx, err := s.retryTransaction(ctx, networkKey, "finalize-auction", func() (*ethtypes.Transaction, error) {
+					return client.FinalizeAuction(ctx, intentID)
+				})
+
+				if err != nil {
+					s.txMutexes[networkKey].Unlock()
+					log.WithError(err).Warn("Failed to finalize auction after retries")
+					time.Sleep(2 * time.Second)
+				} else {
+					_, waitErr := client.WaitForTransaction(ctx, tx)
+					s.txMutexes[networkKey].Unlock()
+
+					if waitErr != nil {
+						log.WithError(waitErr).Warn("Failed to confirm finalization transaction")
 						time.Sleep(2 * time.Second)
 					} else {
-						_, waitErr := client.WaitForTransaction(ctx, tx)
-						s.txMutexes[networkKey].Unlock()
-
-						if waitErr != nil {
-							log.WithError(waitErr).Warn("Failed to confirm finalization transaction")
-							time.Sleep(2 * time.Second)
-						} else {
-							log.WithField("intentID", intentID).Debug("Auction finalized and confirmed")
-						}
-					}
-
-					// Wait for blockchain state to propagate, then re-fetch intent
-					time.Sleep(3 * time.Second)
-					intent, err = client.GetIntent(ctx, intentID)
-					if err != nil {
-						log.WithError(err).Warn("Failed to get intent after finalization, will retry")
-						time.Sleep(2 * time.Second)
-						continue
+						log.WithField("intentID", intentID).Debug("Auction finalized and confirmed")
 					}
 				}
 
-				// If winner is still zero after trying to finalize, wait and retry a few times
-				// This handles the case where another party is finalizing the auction
-				if intent.WinningSolver == (common.Address{}.Hex()) {
-					maxRetries := 5
-					for i := 0; i < maxRetries; i++ {
-						log.WithFields(log.Fields{
-							"intentID": intentID,
-							"attempt":  i + 1,
-						}).Debug("Winner still not set, waiting for finalization")
-
-						time.Sleep(3 * time.Second)
-
-						intent, err = client.GetIntent(ctx, intentID)
-						if err != nil {
-							log.WithError(err).Warn("Failed to get intent while waiting for finalization")
-							continue
-						}
-
-						if intent.WinningSolver != (common.Address{}.Hex()) {
-							log.WithField("intentID", intentID).Debug("Winner set after waiting")
-							break
-						}
-					}
-				}
-
-				if intent.WinningSolver == client.GetSolverAddress().Hex() {
-					key := fmt.Sprintf("%s-%s", networkKey, intentID.String())
-
-					s.mu.Lock()
-					alreadyHandling := s.handlingWins[key]
-					if !alreadyHandling {
-						s.handlingWins[key] = true
-						// Persist to database
-						s.store.SetHandlingWin(networkKey, intentID.String(), true)
-					}
-					s.mu.Unlock()
-
-					if !alreadyHandling {
-						log.WithFields(log.Fields{
-							"intentID": intentID,
-							"winner":   intent.WinningSolver,
-						}).Info("Auction won by solver")
-						go s.handleAuctionWon(ctx, networkKey, intentID)
-					}
-				} else {
-					log.WithFields(log.Fields{
-						"intentID":     intentID,
-						"winner":       intent.WinningSolver,
-						"ourAddr":      client.GetSolverAddress().Hex(),
-						"winningBid":   intent.WinningBid.String(),
-						"ourBid":       currentBid.String(),
-						"hasPlacedBid": hasPlacedBid,
-					}).Info("Auction not won")
-				}
-				return
-			}
-
-			highestBid, highestBidder, err := client.GetHighestBid(ctx, intentID)
-			if err != nil {
-				log.WithError(err).Error("Failed to get highest bid")
-				continue
-			}
-
-			shouldBid := false
-			isWinning := highestBidder == client.GetSolverAddress()
-
-			if highestBid.Cmp(big.NewInt(0)) == 0 {
-				shouldBid = true
-			} else if !isWinning {
-				newBid := new(big.Int).Add(highestBid, s.cfg.SolverConfig.BidIncrement)
-
-				minBid := new(big.Int).Add(intent.AmountA, intent.Reward)
-				profitMargin := new(big.Float).SetFloat64(s.cfg.SolverConfig.MinProfitMargin)
-				minBidFloat := new(big.Float).SetInt(minBid)
-				marginAmount := new(big.Float).Mul(minBidFloat, profitMargin)
-				minProfitableBidFloat := new(big.Float).Sub(minBidFloat, marginAmount)
-				minProfitableBid, _ := minProfitableBidFloat.Int(nil)
-
-				if newBid.Cmp(minProfitableBid) >= 0 && newBid.Cmp(s.cfg.SolverConfig.MaxBidAmount) <= 0 {
-					currentBid = newBid
-					shouldBid = true
-					log.WithFields(log.Fields{
-						"intentID":      intentID,
-						"newBid":        newBid.String(),
-						"highestBid":    highestBid.String(),
-						"minProfitable": minProfitableBid.String(),
-					}).Info("Calculated competitive counter-bid")
-				} else {
-					log.WithFields(log.Fields{
-						"intentID":      intentID,
-						"wouldBid":      newBid.String(),
-						"highestBid":    highestBid.String(),
-						"minProfitable": minProfitableBid.String(),
-						"reason":        "not profitable or exceeds max",
-					}).Info("Cannot outbid profitably, giving up")
-					return
+				// Wait for blockchain state to propagate, then re-fetch intent
+				time.Sleep(3 * time.Second)
+				intent, err = client.GetIntent(ctx, intentID)
+				if err != nil {
+					log.WithError(err).Warn("Failed to get intent after finalization, will retry")
+					time.Sleep(2 * time.Second)
+					continue
 				}
 			}
 
-			if shouldBid {
-				select {
-				case s.bidWorkerPools[networkKey] <- bidJob{
-					ctx:        ctx,
-					client:     client,
-					intentID:   intentID,
-					bidAmount:  currentBid,
-					networkKey: networkKey,
-				}:
-					hasPlacedBid = true
-					log.WithFields(log.Fields{
-						"intentID":  intentID,
-						"bidAmount": currentBid.String(),
-						"network":   networkKey,
-					}).Info("Bid submitted to worker pool")
-				case <-time.After(time.Second):
+			// If winner is still zero after trying to finalize, wait and retry a few times
+			// This handles the case where another party is finalizing the auction
+			if intent.WinningSolver == (common.Address{}.Hex()) {
+				maxRetries := 5
+				for i := 0; i < maxRetries; i++ {
 					log.WithFields(log.Fields{
 						"intentID": intentID,
-						"network":  networkKey,
-					}).Warn("Bid worker pool full, will retry next cycle")
+						"attempt":  i + 1,
+					}).Debug("Winner still not set, waiting for finalization")
+
+					time.Sleep(3 * time.Second)
+
+					intent, err = client.GetIntent(ctx, intentID)
+					if err != nil {
+						log.WithError(err).Warn("Failed to get intent while waiting for finalization")
+						continue
+					}
+
+					if intent.WinningSolver != (common.Address{}.Hex()) {
+						log.WithField("intentID", intentID).Debug("Winner set after waiting")
+						break
+					}
 				}
+			}
+
+			if intent.WinningSolver == client.GetSolverAddress().Hex() {
+				key := fmt.Sprintf("%s-%s", networkKey, intentID.String())
+
+				s.mu.Lock()
+				alreadyHandling := s.handlingWins[key]
+				if !alreadyHandling {
+					s.handlingWins[key] = true
+					// Persist to database
+					s.store.SetHandlingWin(networkKey, intentID.String(), true)
+				}
+				s.mu.Unlock()
+
+				if !alreadyHandling {
+					log.WithFields(log.Fields{
+						"intentID": intentID,
+						"winner":   intent.WinningSolver,
+					}).Info("Auction won by solver")
+					go s.handleAuctionWon(ctx, networkKey, intentID)
+				}
+			} else {
+				log.WithFields(log.Fields{
+					"intentID":     intentID,
+					"winner":       intent.WinningSolver,
+					"ourAddr":      client.GetSolverAddress().Hex(),
+					"winningBid":   intent.WinningBid.String(),
+					"ourBid":       currentBid.String(),
+					"hasPlacedBid": hasPlacedBid,
+				}).Info("Auction not won")
+			}
+			return
+		}
+
+		highestBid, highestBidder, err := client.GetHighestBid(ctx, intentID)
+		if err != nil {
+			log.WithError(err).Error("Failed to get highest bid")
+			continue
+		}
+
+		shouldBid := false
+		isWinning := highestBidder == client.GetSolverAddress()
+
+		if highestBid.Cmp(big.NewInt(0)) == 0 {
+			shouldBid = true
+		} else if !isWinning {
+			newBid := new(big.Int).Add(highestBid, s.cfg.SolverConfig.BidIncrement)
+
+			minBid := new(big.Int).Add(intent.AmountA, intent.Reward)
+			profitMargin := new(big.Float).SetFloat64(s.cfg.SolverConfig.MinProfitMargin)
+			minBidFloat := new(big.Float).SetInt(minBid)
+			marginAmount := new(big.Float).Mul(minBidFloat, profitMargin)
+			minProfitableBidFloat := new(big.Float).Sub(minBidFloat, marginAmount)
+			minProfitableBid, _ := minProfitableBidFloat.Int(nil)
+
+			if newBid.Cmp(minProfitableBid) >= 0 && newBid.Cmp(s.cfg.SolverConfig.MaxBidAmount) <= 0 {
+				currentBid = newBid
+				shouldBid = true
+				log.WithFields(log.Fields{
+					"intentID":      intentID,
+					"newBid":        newBid.String(),
+					"highestBid":    highestBid.String(),
+					"minProfitable": minProfitableBid.String(),
+				}).Info("Calculated competitive counter-bid")
+			} else {
+				log.WithFields(log.Fields{
+					"intentID":      intentID,
+					"wouldBid":      newBid.String(),
+					"highestBid":    highestBid.String(),
+					"minProfitable": minProfitableBid.String(),
+					"reason":        "not profitable or exceeds max",
+				}).Info("Cannot outbid profitably, giving up")
+				return
+			}
+		}
+
+		if shouldBid {
+			select {
+			case s.bidWorkerPools[networkKey] <- bidJob{
+				ctx:        ctx,
+				client:     client,
+				intentID:   intentID,
+				bidAmount:  currentBid,
+				networkKey: networkKey,
+			}:
+				hasPlacedBid = true
+				log.WithFields(log.Fields{
+					"intentID":  intentID,
+					"bidAmount": currentBid.String(),
+					"network":   networkKey,
+				}).Info("Bid submitted to worker pool")
+			case <-time.After(time.Second):
+				log.WithFields(log.Fields{
+					"intentID": intentID,
+					"network":  networkKey,
+				}).Warn("Bid worker pool full, will retry next cycle")
 			}
 		}
 	}
