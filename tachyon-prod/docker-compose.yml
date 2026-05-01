@@ -27,8 +27,8 @@ services:
       # Override DB_PATH so it lands inside the mounted volume; the binary
       # appends "/relayer" itself.
       DB_PATH: /data
-    ports:
-      - "${RELAYER_PORT:-3000}:3000"
+    expose:
+      - "3000"
     volumes:
       - relayer-data:/data
     networks:
@@ -61,8 +61,8 @@ services:
       # not localhost — the .env's RELAYER_URL=http://localhost:3000 is fine
       # for direct host runs but must be overridden here.
       RELAYER_URL: http://relayer:3000
-    ports:
-      - "${SOLVER_PORT:-3001}:3001"
+    expose:
+      - "3001"
     volumes:
       - solver-data:/data
     networks:
@@ -82,10 +82,40 @@ services:
         max-size: "50m"
         max-file: "3"
 
+  caddy:
+    image: caddy:2-alpine
+    container_name: tachyon-caddy
+    restart: unless-stopped
+    stop_grace_period: 30s
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - tachyon-network
+    depends_on:
+      relayer:
+        condition: service_healthy
+      solver:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
 volumes:
   relayer-data:
     driver: local
   solver-data:
+    driver: local
+  caddy-data:
+    driver: local
+  caddy-config:
     driver: local
 
 networks:

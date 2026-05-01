@@ -1,0 +1,15 @@
+# TLS-terminating reverse proxy for relayer + solver.
+# Caddy fetches Let's Encrypt certs automatically on first request and
+# renews them in the background. Certs persist on the caddy-data volume.
+
+{
+	email sudeep@inco.network
+}
+
+relayer.tachyon.pe {
+	reverse_proxy relayer:3000
+}
+
+solver.tachyon.pe {
+	reverse_proxy solver:3001
+}
