@@ -589,13 +589,15 @@ func (s *Solver) handleNewIntent(ctx context.Context, networkKey string, intentI
 
 // calculateProfitableBid calculates a profitable bid amount.
 //
-// The bid amount is set to (amountA + reward) * (1 - profitMargin). On top of
-// the raw margin check the function fetches live USD prices for TokenA and
-// TokenB from four public APIs (CoinGecko, CoinCap, CryptoCompare, Binance)
-// and verifies that the solver's net gain in TokenA — converted to USD — exceeds
-// the cost of providing expectedAmountB of TokenB on the destination chain.
-// If price data is unavailable from at least two sources the check is skipped and
-// the existing raw-amount logic governs.
+// Bid amount = (amountA + reward) * (1 - MinProfitMargin) — solver's collateral
+// in the auction; refunded at settle. Profitability is checked separately in
+// USD using oracle prices: the solver receives amountA + reward back from the
+// source bridge after settle and pays expectedAmountB on the destination, so
+// profit = revenue (amountA+reward) - payout (amountB) - gas. The intent is
+// accepted iff (profit / payout) >= MinProfitMargin.
+//
+// Oracle resolution is hard-required (fail-closed): symbol or price lookup
+// failures cause the intent to be skipped rather than bid on with stale data.
 func (s *Solver) calculateProfitableBid(ctx context.Context, networkKey string, intent *types.Intent) (bool, *big.Int) {
 	sourceClient := s.clients[networkKey]
 	tokenAAddr := common.HexToAddress(intent.TokenA)
@@ -683,34 +685,50 @@ func (s *Solver) calculateProfitableBid(ctx context.Context, networkKey string, 
 	}
 
 	// --- 3. USD profitability check (uses prices/decimals resolved above) ---
-	// Solver net gain on source chain: amountA + reward - targetBid (= margin * minBid)
-	netGainA := new(big.Int).Sub(minBid, targetBid)
-	netGainAFloat, _ := new(big.Float).SetInt(netGainA).Float64()
-	gainUSD := (netGainAFloat / math.Pow(10, float64(decimalsA))) * priceA
+	// Real economics on settle:
+	//   Solver receives  amountA + reward  (refunded from bridge after settle)
+	//   Solver pays      expectedAmountB   (delivered to recipient on dest)
+	//   Solver pays      ~5 txs of mainnet gas across both chains
+	//
+	// The winningBid is collateral — locked at deposit time, refunded at
+	// settle — so it does not enter the profit calculation. Margin is
+	// expressed relative to the payout (the actual capital at risk).
+	const gasUSD = 0.001 // conservative estimate for 5 mainnet txs
 
-	// Cost of providing expectedAmountB of TokenB on dest chain
-	expectedBFloat, _ := new(big.Float).SetInt(intent.ExpectedAmountB).Float64()
-	costUSD := (expectedBFloat / math.Pow(10, float64(decimalsB))) * priceB
+	revenueRawA := new(big.Int).Add(intent.AmountA, intent.Reward)
+	revenueRawAFloat, _ := new(big.Float).SetInt(revenueRawA).Float64()
+	revenueUSD := (revenueRawAFloat / math.Pow(10, float64(decimalsA))) * priceA
 
-	profitUSD := gainUSD - costUSD
+	payoutBFloat, _ := new(big.Float).SetInt(intent.ExpectedAmountB).Float64()
+	payoutUSD := (payoutBFloat / math.Pow(10, float64(decimalsB))) * priceB
+
+	profitUSD := revenueUSD - payoutUSD - gasUSD
+	profitMargin := 0.0
+	if payoutUSD > 0 {
+		profitMargin = profitUSD / payoutUSD
+	}
 
 	log.WithFields(log.Fields{
-		"symbolA":   symbolA,
-		"symbolB":   symbolB,
-		"priceA":    priceA,
-		"priceB":    priceB,
-		"decimalsA": decimalsA,
-		"decimalsB": decimalsB,
-		"gainUSD":   gainUSD,
-		"costUSD":   costUSD,
-		"profitUSD": profitUSD,
+		"symbolA":      symbolA,
+		"symbolB":      symbolB,
+		"priceA":       priceA,
+		"priceB":       priceB,
+		"decimalsA":    decimalsA,
+		"decimalsB":    decimalsB,
+		"revenueUSD":   revenueUSD,
+		"payoutUSD":    payoutUSD,
+		"gasUSD":       gasUSD,
+		"profitUSD":    profitUSD,
+		"profitMargin": profitMargin,
 	}).Info("USD profitability analysis")
 
-	if profitUSD < 0 {
+	if profitMargin < s.cfg.SolverConfig.MinProfitMargin {
 		log.WithFields(log.Fields{
-			"profitUSD": profitUSD,
-			"symbolA":   symbolA,
-			"symbolB":   symbolB,
+			"profitUSD":    profitUSD,
+			"profitMargin": profitMargin,
+			"minMargin":    s.cfg.SolverConfig.MinProfitMargin,
+			"symbolA":      symbolA,
+			"symbolB":      symbolB,
 		}).Info("Intent not profitable in USD terms, skipping")
 		return false, nil
 	}
