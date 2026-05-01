@@ -267,7 +267,7 @@ func erc20Approve(ctx context.Context, s Signer, chainID string, tokenAddr, spen
 // the signer's address. If the existing allowance is already sufficient it
 // is a no-op.
 func ensureAllowance(ctx context.Context, s Signer, chainID string, tokenAddr, spender common.Address, amount *big.Int) (string, error) {
-	current, err := erc20Allowance(ctx, s, chainID, tokenAddr, s.Address(), spender)
+	current, err := erc20Allowance(ctx, s, chainID, tokenAddr, s.AddressOnChain(chainID), spender)
 	if err != nil {
 		return "", fmt.Errorf("read allowance: %w", err)
 	}

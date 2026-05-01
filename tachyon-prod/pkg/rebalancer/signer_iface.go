@@ -22,10 +22,21 @@ import (
 // swap, on-chain quoter calls) are implemented as free functions taking a
 // Signer, so the same code paths work for both.
 type Signer interface {
-	// Address returns the on-chain address that owns the funds and appears
-	// as msg.sender for the operations issued. For EOA, the EOA itself; for
-	// Safe, the Safe contract address.
+	// Address returns a "primary" on-chain address. For EOA, the EOA itself.
+	// For Safe, an arbitrary one of the per-chain Safe addresses (used only
+	// where the chain context is unknown — most callers should prefer
+	// AddressOnChain).
 	Address() common.Address
+
+	// AddressOnChain returns the address that owns funds and appears as
+	// msg.sender on the given chain. For EOA-mode signers this is the same
+	// for every chain. For Safe-mode signers it can differ across chains
+	// (different proxy factories produce different proxy addresses).
+	//
+	// All chain-scoped operations (balance reads, allowance checks, recipient
+	// and refund addresses for bridges, swap recipients) must use this rather
+	// than Address() to behave correctly when Safes differ per chain.
+	AddressOnChain(chainID string) common.Address
 
 	// SendTx builds, signs, and submits a transaction targeting `to` with
 	// `value` native gas and `data` calldata on the chain identified by

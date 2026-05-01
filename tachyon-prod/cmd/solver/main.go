@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"math/big"
 	"os"
 	"os/signal"
+	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -15,6 +19,19 @@ import (
 	"github.com/zk-tachyon/tachyon-prod/pkg/rebalancer"
 	"github.com/zk-tachyon/tachyon-prod/pkg/solver"
 )
+
+// getBoolEnv parses a truthy env var; returns def on missing/invalid.
+func getBoolEnv(key string, def bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return def
+	}
+	return b
+}
 
 func main() {
 	log.SetFormatter(&log.TextFormatter{
@@ -125,6 +142,48 @@ func main() {
 
 		api.NewRebalancerAPI(rb).RegisterAdminRoutes(adminGroup)
 		log.WithField("targets", len(rbCfg.Targets)).Info("Rebalancer enabled — admin endpoints at /admin/rebalance/*")
+
+		// Auto-trigger: when REBALANCER_AUTO_ON_SETTLE=true, fire a rebalance
+		// after each successful intent settle. The TryLock guard ensures
+		// overlapping settles in quick succession don't queue parallel
+		// rebalances; if one is in flight the new trigger is silently skipped.
+		if getBoolEnv("REBALANCER_AUTO_ON_SETTLE", false) {
+			var rbMu sync.Mutex
+			solverInstance.SetOnIntentSettled(func(intentID *big.Int, network string) {
+				if !rbMu.TryLock() {
+					log.WithFields(log.Fields{
+						"intentID": intentID.String(),
+						"network":  network,
+					}).Info("Rebalancer in flight, skipping post-settle auto-trigger")
+					return
+				}
+				defer rbMu.Unlock()
+
+				// Brief delay so on-chain state has propagated past the settle.
+				time.Sleep(15 * time.Second)
+
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+				defer cancel()
+				_, plan, txs, err := rb.Execute(ctx)
+				if err != nil {
+					log.WithError(err).WithField("completedTxs", len(txs)).
+						Warn("Auto-rebalance halted")
+					return
+				}
+				if plan != nil && len(plan.Actions) == 0 {
+					log.WithFields(log.Fields{
+						"intentID": intentID.String(),
+					}).Debug("Auto-rebalance: nothing to do, all balances within targets")
+					return
+				}
+				log.WithFields(log.Fields{
+					"intentID": intentID.String(),
+					"actions":  len(plan.Actions),
+					"txs":      len(txs),
+				}).Info("Auto-rebalance complete")
+			})
+			log.Info("Rebalancer auto-trigger LIVE — will fire after each successful intent settle")
+		}
 	} else {
 		log.Info("Rebalancer disabled (set REBALANCER_ENABLED=true to enable)")
 	}

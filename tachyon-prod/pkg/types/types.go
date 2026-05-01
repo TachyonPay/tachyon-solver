@@ -52,6 +52,14 @@ type SolverConfig struct {
 	MaxBidAmount    *big.Int
 	BidIncrement    *big.Int
 	BalanceBuffer   float64
+
+	// UserDailyCapUSDCents is the per-user daily $-value ceiling, expressed in
+	// US dollar cents (int64). Each intent's USD value is computed at bid
+	// decision time via the price oracle (`amountA / 10^decimalsA * priceA`)
+	// and added to the user's running total. Intents that would push a user
+	// over this ceiling are skipped. Set via SOLVER_USER_DAILY_CAP_USD as a
+	// human-readable USD figure (e.g. "2000" for $2,000); zero/absent disables.
+	UserDailyCapUSDCents int64
 }
 
 // RecipientInfo stores anonymous recipient information (TEE simulation)

@@ -218,10 +218,11 @@ func lzSend(
 		}
 	}
 
-	// Pack send(SendParam, MessagingFee, refundAddress) and submit.
-	// Refund goes to the Signer's address (Safe or EOA) so any unused native
-	// fee returns home.
-	refund := s.Address()
+	// Pack send(SendParam, MessagingFee, refundAddress) and submit. Refund
+	// goes to the source-chain address (per-chain Safe in Safe mode, EOA
+	// otherwise) so any unused native fee returns home on the chain we paid
+	// from.
+	refund := s.AddressOnChain(srcChainID)
 	data, err := stargateOFTABI.Pack("send", sp, fee, refund)
 	if err != nil {
 		return "", fmt.Errorf("pack send: %w", err)
@@ -279,7 +280,7 @@ func stargateUSDCBridge(ctx context.Context, s Signer, srcChainID, dstChainID st
 		return "", fmt.Errorf("unsupported Stargate USDC route %s → %s", srcChainID, dstChainID)
 	}
 
-	return lzSend(ctx, s, srcChainID, oft, tokenIn, dstChainID, dstToken, dstEid, s.Address(), amount, slippagePct, gasBufferWei)
+	return lzSend(ctx, s, srcChainID, oft, tokenIn, dstChainID, dstToken, dstEid, s.AddressOnChain(dstChainID), amount, slippagePct, gasBufferWei)
 }
 
 // oftZENBridge bridges ZEN between Base and Horizen using the LayerZero OFT.
@@ -303,5 +304,5 @@ func oftZENBridge(ctx context.Context, s Signer, srcChainID, dstChainID string, 
 		return "", fmt.Errorf("unsupported ZEN OFT route %s → %s", srcChainID, dstChainID)
 	}
 
-	return lzSend(ctx, s, srcChainID, oft, tokenIn, dstChainID, dstToken, dstEid, s.Address(), amount, slippagePct, gasBufferWei)
+	return lzSend(ctx, s, srcChainID, oft, tokenIn, dstChainID, dstToken, dstEid, s.AddressOnChain(dstChainID), amount, slippagePct, gasBufferWei)
 }

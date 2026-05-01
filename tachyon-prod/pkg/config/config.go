@@ -127,11 +127,25 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("invalid BALANCE_BUFFER: %w", err)
 	}
 
+	// Optional per-user daily $-value cap. Operator sets a human-readable USD
+	// figure (e.g. "2000" for $2k); we convert to cents internally.
+	// 0 / absent disables the cap. Each intent's $-value is resolved via
+	// the price oracle at bid time — oracle failure causes the intent to
+	// be skipped (fail-closed).
+	capUSD, err := strconv.ParseFloat(getEnv("SOLVER_USER_DAILY_CAP_USD", "0"), 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid SOLVER_USER_DAILY_CAP_USD: %w", err)
+	}
+	if capUSD < 0 {
+		return nil, fmt.Errorf("SOLVER_USER_DAILY_CAP_USD must be >= 0, got %f", capUSD)
+	}
+
 	cfg.SolverConfig = types.SolverConfig{
-		MinProfitMargin: minProfitMargin,
-		MaxBidAmount:    maxBidAmount,
-		BidIncrement:    bidIncrement,
-		BalanceBuffer:   balanceBuffer,
+		MinProfitMargin:      minProfitMargin,
+		MaxBidAmount:         maxBidAmount,
+		BidIncrement:         bidIncrement,
+		BalanceBuffer:        balanceBuffer,
+		UserDailyCapUSDCents: int64(capUSD * 100),
 	}
 
 	// Load wallet configuration
