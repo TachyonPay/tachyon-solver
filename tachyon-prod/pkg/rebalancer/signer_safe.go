@@ -71,17 +71,28 @@ type relayProxyResponse struct {
 // and the relayer URL from config (REBALANCER_RELAYER_URL, falling back to
 // RELAYER_URL, then http://localhost:3000).
 //
-// Returns (nil, nil) if `clients` is empty.
+// Chains without a SAFE_ADDRESS configured are silently skipped — the
+// rebalancer only needs Safes on the mainnet chains it actually operates on
+// (Base + Horizen mainnet). Testnet chains in the same .env can stay
+// EOA-only.
+//
+// Returns (nil, nil) if `clients` is empty or no chain has a Safe.
 func NewSafeSignerFromClients(clients map[string]*blockchain.Client) (*SafeSigner, error) {
 	if len(clients) == 0 {
 		return nil, nil
 	}
-	safe := common.Address{}
+	safeClients := make(map[string]*blockchain.Client, len(clients))
 	mus := make(map[string]*sync.Mutex, len(clients))
+	safe := common.Address{}
+	skipped := 0
 	for chainID, c := range clients {
 		if !c.HasSafe() {
-			return nil, fmt.Errorf("chain %s has no SAFE_ADDRESS configured", chainID)
+			skipped++
+			continue
 		}
+		safeClients[chainID] = c
+		mus[chainID] = &sync.Mutex{}
+
 		addr := c.GetSafeAddress()
 		if safe == (common.Address{}) {
 			safe = addr
@@ -91,8 +102,14 @@ func NewSafeSignerFromClients(clients map[string]*blockchain.Client) (*SafeSigne
 				"chain2Safe": addr.Hex(),
 			}).Warn("Safe addresses differ across chains — this is unusual")
 		}
-		mus[chainID] = &sync.Mutex{}
 	}
+	if len(safeClients) == 0 {
+		return nil, nil
+	}
+	if skipped > 0 {
+		log.WithField("skipped", skipped).Info("Some chains skipped from Safe wiring (no SAFE_ADDRESS configured)")
+	}
+	clients = safeClients
 
 	relayerURL := RelayerURL()
 

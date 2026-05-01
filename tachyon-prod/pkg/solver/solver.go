@@ -49,6 +49,20 @@ type Solver struct {
 	handlingWins       map[string]bool
 	chainPairMap       map[string]string
 	oracle             *priceOracle
+	intentCap          *intentCapTracker
+
+	// onIntentSettled fires after a successful settle, in a goroutine. Used
+	// by the rebalancer auto-trigger wired in cmd/solver/main.go to consider
+	// rebalancing whenever solver inventory shifts. Optional; may be nil.
+	onIntentSettled func(intentID *big.Int, network string)
+}
+
+// SetOnIntentSettled wires a callback fired immediately after each successful
+// settle, in a separate goroutine (does not block the settle path). Caller is
+// expected to provide its own concurrency guard if reentrant runs are unsafe
+// (e.g. the rebalancer uses a TryLock to skip overlapping triggers).
+func (s *Solver) SetOnIntentSettled(cb func(intentID *big.Int, network string)) {
+	s.onIntentSettled = cb
 }
 
 // NewSolver creates a new solver instance
@@ -104,6 +118,7 @@ func NewSolver(cfg *config.Config) (*Solver, error) {
 		handlingWins:       make(map[string]bool),
 		chainPairMap:       chainPairMap,
 		oracle:             newPriceOracle(),
+		intentCap:          newIntentCapTracker(cfg.SolverConfig.UserDailyCapUSDCents, store),
 	}
 
 	// Load persisted state from DB
@@ -584,7 +599,73 @@ func (s *Solver) calculateProfitableBid(ctx context.Context, networkKey string, 
 	sourceClient := s.clients[networkKey]
 	tokenAAddr := common.HexToAddress(intent.TokenA)
 
-	// --- 1. Calculate target bid via profit margin ---
+	// --- 0. Resolve token info + USD prices upfront. Both the per-user
+	// daily $-value cap (next step) and the USD profitability check below
+	// need them. Failure to resolve any of these is a hard reject — without
+	// verified pricing we can't safely cap or bid (fail-closed).
+	destChainID := intent.DestChainId.String()
+	destClient, destExists := s.clients[destChainID]
+	if !destExists {
+		log.WithFields(log.Fields{
+			"intentID":    intent.IntentID.String(),
+			"destChainID": destChainID,
+		}).Info("Destination chain not configured, skipping intent")
+		return false, nil
+	}
+	tokenBAddr := common.HexToAddress(intent.TokenB)
+
+	symbolA, err := sourceClient.GetTokenSymbol(ctx, tokenAAddr)
+	if err != nil {
+		log.WithError(err).WithField("token", tokenAAddr.Hex()).Info("Could not resolve TokenA symbol, skipping intent")
+		return false, nil
+	}
+	symbolB, err := destClient.GetTokenSymbol(ctx, tokenBAddr)
+	if err != nil {
+		log.WithError(err).WithField("token", tokenBAddr.Hex()).Info("Could not resolve TokenB symbol, skipping intent")
+		return false, nil
+	}
+	priceA, err := s.oracle.FetchConsensusPrice(symbolA)
+	if err != nil {
+		log.WithError(err).WithField("symbol", symbolA).Info("Could not fetch TokenA price from oracles, skipping intent")
+		return false, nil
+	}
+	priceB, err := s.oracle.FetchConsensusPrice(symbolB)
+	if err != nil {
+		log.WithError(err).WithField("symbol", symbolB).Info("Could not fetch TokenB price from oracles, skipping intent")
+		return false, nil
+	}
+	decimalsA, err := sourceClient.GetTokenDecimals(ctx, tokenAAddr)
+	if err != nil {
+		decimalsA = 18
+	}
+	decimalsB, err := destClient.GetTokenDecimals(ctx, tokenBAddr)
+	if err != nil {
+		decimalsB = 18
+	}
+
+	// --- 1. Per-user daily $-value cap. Cap applies across all token types
+	// (USDC, ZEN, WETH, …) — every intent's $-value contributes. With oracle
+	// prices already resolved above, we just compute USD-cents and check.
+	if s.intentCap != nil && s.intentCap.CapCents() > 0 {
+		amountAFloat, _ := new(big.Float).SetInt(intent.AmountA).Float64()
+		amountAUSD := (amountAFloat / math.Pow(10, float64(decimalsA))) * priceA
+		intentCents := int64(math.Ceil(amountAUSD * 100))
+		userAddr := common.HexToAddress(intent.User)
+		if !s.intentCap.Allow(userAddr, intentCents) {
+			usedCents := s.intentCap.Used(userAddr)
+			log.WithFields(log.Fields{
+				"intentID":     intent.IntentID.String(),
+				"user":         userAddr.Hex(),
+				"intentUSD":    amountAUSD,
+				"usedTodayUSD": float64(usedCents) / 100.0,
+				"capUSD":       float64(s.intentCap.CapCents()) / 100.0,
+				"symbolA":      symbolA,
+			}).Info("User would exceed daily $-value cap — skipping bid")
+			return false, nil
+		}
+	}
+
+	// --- 2. Calculate target bid via profit margin ---
 	minBid := new(big.Int).Add(intent.AmountA, intent.Reward)
 	profitMarginFloat := new(big.Float).SetFloat64(s.cfg.SolverConfig.MinProfitMargin)
 	minBidFloat := new(big.Float).SetInt(minBid)
@@ -600,54 +681,7 @@ func (s *Solver) calculateProfitableBid(ctx context.Context, networkKey string, 
 		return false, nil
 	}
 
-	// --- 2. USD profitability check ---
-	// Skip the intent if we can't resolve token symbols or fetch oracle prices
-	// for both legs. Without verified USD pricing we have no safe way to know
-	// the bid is actually profitable, so let the intent expire and allow the
-	// user to claim back their deposit.
-	destChainID := intent.DestChainId.String()
-	destClient, destExists := s.clients[destChainID]
-	if !destExists {
-		log.WithFields(log.Fields{
-			"intentID":    intent.IntentID.String(),
-			"destChainID": destChainID,
-		}).Info("Destination chain not configured, skipping intent")
-		return false, nil
-	}
-
-	tokenBAddr := common.HexToAddress(intent.TokenB)
-
-	symbolA, err := sourceClient.GetTokenSymbol(ctx, tokenAAddr)
-	if err != nil {
-		log.WithError(err).WithField("token", tokenAAddr.Hex()).Info("Could not resolve TokenA symbol, skipping intent")
-		return false, nil
-	}
-	symbolB, err := destClient.GetTokenSymbol(ctx, tokenBAddr)
-	if err != nil {
-		log.WithError(err).WithField("token", tokenBAddr.Hex()).Info("Could not resolve TokenB symbol, skipping intent")
-		return false, nil
-	}
-
-	priceA, err := s.oracle.FetchConsensusPrice(symbolA)
-	if err != nil {
-		log.WithError(err).WithField("symbol", symbolA).Info("Could not fetch TokenA price from oracles, skipping intent")
-		return false, nil
-	}
-	priceB, err := s.oracle.FetchConsensusPrice(symbolB)
-	if err != nil {
-		log.WithError(err).WithField("symbol", symbolB).Info("Could not fetch TokenB price from oracles, skipping intent")
-		return false, nil
-	}
-
-	decimalsA, err := sourceClient.GetTokenDecimals(ctx, tokenAAddr)
-	if err != nil {
-		decimalsA = 18
-	}
-	decimalsB, err := destClient.GetTokenDecimals(ctx, tokenBAddr)
-	if err != nil {
-		decimalsB = 18
-	}
-
+	// --- 3. USD profitability check (uses prices/decimals resolved above) ---
 	// Solver net gain on source chain: amountA + reward - targetBid (= margin * minBid)
 	netGainA := new(big.Int).Sub(minBid, targetBid)
 	netGainAFloat, _ := new(big.Float).SetInt(netGainA).Float64()
@@ -999,6 +1033,29 @@ func (s *Solver) handleAuctionWon(ctx context.Context, networkKey string, intent
 		"bidAmount":  intent.WinningBid,
 		"tokenA":     intent.TokenA,
 	}).Info("Won auction, approving tokens for deposit")
+
+	// Per-user daily $-value cap: record the won intent's USD value so the
+	// user's running daily total grows. We re-resolve the price + decimals
+	// here because the auction may have ended seconds-to-minutes after the
+	// bid, and we want to account for the actual won intent. If oracle
+	// pricing is unavailable at this moment we still record at zero — the
+	// commitment was already made when we bid (and the bid path already
+	// hard-rejects on oracle failure, so this is mostly defensive).
+	if s.intentCap != nil && s.intentCap.CapCents() > 0 {
+		tokenAAddr := common.HexToAddress(intent.TokenA)
+		if symbolA, err := client.GetTokenSymbol(ctx, tokenAAddr); err == nil {
+			if priceA, err := s.oracle.FetchConsensusPrice(symbolA); err == nil {
+				decimalsA, err := client.GetTokenDecimals(ctx, tokenAAddr)
+				if err != nil {
+					decimalsA = 18
+				}
+				amountAFloat, _ := new(big.Float).SetInt(intent.AmountA).Float64()
+				amountAUSD := (amountAFloat / math.Pow(10, float64(decimalsA))) * priceA
+				cents := int64(math.Ceil(amountAUSD * 100))
+				s.intentCap.Record(common.HexToAddress(intent.User), cents)
+			}
+		}
+	}
 
 	tokenAddr := common.HexToAddress(intent.TokenA)
 	bidAmount := intent.WinningBid
@@ -1427,6 +1484,13 @@ func (s *Solver) settleIntent(ctx context.Context, network string, chain1IntentI
 				s.persistIntentStatus(network, chain1IntentID.String(), status)
 			}
 			s.mu.Unlock()
+
+			// Fire the post-settle hook (rebalancer auto-trigger lives here).
+			// Run in a goroutine so settle returns immediately; the hook is
+			// expected to manage its own concurrency.
+			if cb := s.onIntentSettled; cb != nil {
+				go cb(chain1IntentID, network)
+			}
 			return
 		}
 
