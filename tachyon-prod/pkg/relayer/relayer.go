@@ -218,25 +218,40 @@ func (r *Relayer) CreatePendingTransaction(record *types.TransactionRecord) erro
 	return r.store.SaveTransactionRecord(record)
 }
 
-// CompleteTransaction marks a TransactionRecord as completed with all tx hashes.
-func (r *Relayer) CompleteTransaction(sourceChainID, intentID, depositTxHash, solveTxHash, settleTxHash string) error {
-	record, err := r.store.GetTransactionRecord(sourceChainID, intentID)
+// CompleteTransaction upserts a TransactionRecord to completed status.
+// If the record already exists it is updated with the provided tx hashes.
+// If it does not exist (relayer never saw the IntentCreated event) a new
+// completed record is created from the full payload the solver sent.
+func (r *Relayer) CompleteTransaction(req *types.CompleteTransactionRequest) error {
+	record, err := r.store.GetTransactionRecord(req.SourceChainID, req.IntentID)
 	if err != nil {
 		return fmt.Errorf("failed to load transaction record: %w", err)
 	}
-	if record == nil {
-		return fmt.Errorf("transaction record not found for %s/%s", sourceChainID, intentID)
-	}
+
 	now := time.Now()
+	if record == nil {
+		record = &types.TransactionRecord{
+			IntentID:        req.IntentID,
+			UserAddress:     req.UserAddress,
+			SourceChainID:   req.SourceChainID,
+			DestChainID:     req.DestChainID,
+			TokenA:          req.TokenA,
+			TokenB:          req.TokenB,
+			AmountA:         req.AmountA,
+			ExpectedAmountB: req.ExpectedAmountB,
+			CreatedAt:       now,
+		}
+	}
+
 	record.Status = "completed"
-	if depositTxHash != "" {
-		record.DepositTxHash = depositTxHash
+	if req.DepositTxHash != "" {
+		record.DepositTxHash = req.DepositTxHash
 	}
-	if solveTxHash != "" {
-		record.SolveTxHash = solveTxHash
+	if req.SolveTxHash != "" {
+		record.SolveTxHash = req.SolveTxHash
 	}
-	if settleTxHash != "" {
-		record.SettleTxHash = settleTxHash
+	if req.SettleTxHash != "" {
+		record.SettleTxHash = req.SettleTxHash
 	}
 	record.UpdatedAt = now
 	record.CompletedAt = &now

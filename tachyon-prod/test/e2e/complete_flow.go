@@ -199,6 +199,33 @@ func main() {
 
 	fmt.Printf("\n✅ Successfully created %d intents\n\n", len(createdIntents))
 
+	// Upsert test: pre-create a pending record for the SECOND intent only.
+	// Test 1 (Horizen→Base): no pending record → solver must CREATE the record from its full payload.
+	// Test 2 (Base→Horizen): pending record exists → solver must UPDATE it to "completed".
+	if len(createdIntents) >= 2 {
+		intent2 := createdIntents[1]
+		test2 := tests[1]
+		decimalsA2 := fetchTokenDecimals(ctx, test2.SourceClient, test2.TokenA)
+		decimalsB2 := fetchTokenDecimals(ctx, test2.DestClient, test2.TokenB)
+		amountA2 := utils.ParseToken(cfg.AmountA, decimalsA2)
+		expectedAmountB2 := utils.ParseToken(cfg.AmountB, decimalsB2)
+		fmt.Println("📝 [Test 2 only] Pre-creating pending record to test solver UPDATE path...")
+		err := recordPendingTransaction(
+			cfg.RelayerURL, wallet,
+			intent2.IntentID.String(),
+			test2.SourceChainID.String(),
+			test2.DestChainID.String(),
+			test2.TokenA, test2.TokenB,
+			amountA2.String(), expectedAmountB2.String(),
+			"",
+		)
+		if err != nil {
+			fmt.Printf("⚠️  Warning: Failed to pre-create pending record for test 2: %v\n", err)
+		} else {
+			fmt.Println("✅ Pending record created — solver will UPDATE this to completed")
+		}
+	}
+
 	// Wait for solver to process all intents
 	fmt.Println(strings.Repeat("=", 80))
 	fmt.Printf("⏳ Waiting 2 minutes for solver to process all intents...\n")
@@ -251,13 +278,34 @@ func main() {
 			fmt.Println("   Destination Chain: ❌ Not Solved")
 		}
 
-		// Check transaction status from relayer (written by FE on create, updated by solver on settle)
-		txStatus := getTransactionStatus(cfg.RelayerURL, wallet, intent.IntentID.String())
-		fmt.Printf("   Transaction Status (relayer): %s\n", txStatus)
-		if txStatus == "completed" {
-			fmt.Println("   Relayer Status: ✅ completed")
+		// Verify relayer transaction record — solver posts the full object so relayer can
+		// upsert: Test 1 verifies CREATE from scratch; Test 2 verifies UPDATE of existing pending.
+		upsertLabel := "CREATE (no pre-existing record)"
+		if i == 1 {
+			upsertLabel = "UPDATE (pre-existing pending record)"
+		}
+		fmt.Printf("   Upsert path: %s\n", upsertLabel)
+		txRecord := getTransactionRecord(cfg.RelayerURL, wallet, intent.IntentID.String())
+		if txRecord == nil {
+			fmt.Println("   Relayer TX Record: ⚠️  not found (solver may not have notified yet)")
 		} else {
-			fmt.Printf("   Relayer Status: ⚠️  %s (solver may not have notified relayer yet)\n", txStatus)
+			fmt.Printf("   Relayer TX Record:\n")
+			fmt.Printf("     status:          %s\n", txRecord.Status)
+			fmt.Printf("     userAddress:     %s\n", txRecord.UserAddress)
+			fmt.Printf("     sourceChainId:   %s\n", txRecord.SourceChainID)
+			fmt.Printf("     destChainId:     %s\n", txRecord.DestChainID)
+			fmt.Printf("     tokenA:          %s\n", txRecord.TokenA)
+			fmt.Printf("     tokenB:          %s\n", txRecord.TokenB)
+			fmt.Printf("     amountA:         %s\n", txRecord.AmountA)
+			fmt.Printf("     expectedAmountB: %s\n", txRecord.ExpectedAmountB)
+			fmt.Printf("     depositTxHash:   %s\n", txRecord.DepositTxHash)
+			fmt.Printf("     solveTxHash:     %s\n", txRecord.SolveTxHash)
+			fmt.Printf("     settleTxHash:    %s\n", txRecord.SettleTxHash)
+			if txRecord.Status == "completed" {
+				fmt.Println("   Relayer TX Record: ✅ completed")
+			} else {
+				fmt.Printf("   Relayer TX Record: ⚠️  status=%s\n", txRecord.Status)
+			}
 		}
 
 		if sourceCompleted && destSolved {
@@ -639,24 +687,6 @@ func createIntent(ctx context.Context, cfg *TestConfig, wallet *utils.TestWallet
 		fmt.Println("✅ Stealth recipients stored for solver")
 	}
 
-	// Immediately write a pending TransactionRecord to the relayer so FE can see
-	// the intent in GET /transactions without waiting for the solver's 5s polling loop.
-	fmt.Println("📝 Recording pending transaction status in relayer...")
-	err = recordPendingTransaction(
-		cfg.RelayerURL, wallet,
-		actualIntentID.String(),
-		test.SourceChainID.String(),
-		test.DestChainID.String(),
-		test.TokenA, test.TokenB,
-		amountA.String(), expectedAmountB.String(),
-		createIntentTx.Hash().Hex(),
-	)
-	if err != nil {
-		fmt.Printf("⚠️  Warning: Failed to record pending transaction: %v\n", err)
-	} else {
-		fmt.Println("✅ Pending status recorded — GET /transactions now shows this intent immediately")
-	}
-
 	return &CreatedIntent{
 		IntentID:      actualIntentID,
 		SourceChain:   test.SourceChain,
@@ -991,30 +1021,42 @@ func recordPendingTransaction(relayerURL string, wallet *utils.TestWallet, inten
 	return nil
 }
 
-// getTransactionStatus reads GET /transactions and returns the status string for a given intentId.
-func getTransactionStatus(relayerURL string, wallet *utils.TestWallet, intentID string) string {
+type txRecord struct {
+	IntentID        string `json:"intentId"`
+	UserAddress     string `json:"userAddress"`
+	SourceChainID   string `json:"sourceChainId"`
+	DestChainID     string `json:"destChainId"`
+	TokenA          string `json:"tokenA"`
+	TokenB          string `json:"tokenB"`
+	AmountA         string `json:"amountA"`
+	ExpectedAmountB string `json:"expectedAmountB"`
+	Status          string `json:"status"`
+	DepositTxHash   string `json:"depositTxHash"`
+	SolveTxHash     string `json:"solveTxHash"`
+	SettleTxHash    string `json:"settleTxHash"`
+}
+
+// getTransactionRecord calls GET /transactions and returns the full record for a given intentId.
+func getTransactionRecord(relayerURL string, wallet *utils.TestWallet, intentID string) *txRecord {
 	req, _ := http.NewRequest(http.MethodGet, relayerURL+"/transactions", nil)
 	for k, v := range walletAuthHeaders(wallet.PrivateKey) {
 		req.Header.Set(k, v)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Sprintf("error: %v", err)
+		return nil
 	}
 	defer resp.Body.Close()
 	var result struct {
-		Transactions []struct {
-			IntentID string `json:"intentId"`
-			Status   string `json:"status"`
-		} `json:"transactions"`
+		Transactions []*txRecord `json:"transactions"`
 	}
 	json.NewDecoder(resp.Body).Decode(&result)
 	for _, t := range result.Transactions {
 		if t.IntentID == intentID {
-			return t.Status
+			return t
 		}
 	}
-	return "not found"
+	return nil
 }
 
 // getIntentDetailsWithRetries fetches settlement details with retry logic

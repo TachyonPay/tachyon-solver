@@ -536,6 +536,7 @@ func (api *RelayerAPI) GetTransactions(c *gin.Context) {
 }
 
 // CompleteTransaction is called by the solver (via admin API key) to mark an intent as settled.
+// Upserts: creates the record from the full payload if it doesn't exist yet.
 func (api *RelayerAPI) CompleteTransaction(c *gin.Context) {
 	var req types.CompleteTransactionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -543,7 +544,7 @@ func (api *RelayerAPI) CompleteTransaction(c *gin.Context) {
 		return
 	}
 
-	if err := api.relayer.CompleteTransaction(req.SourceChainID, req.IntentID, req.DepositTxHash, req.SolveTxHash, req.SettleTxHash); err != nil {
+	if err := api.relayer.CompleteTransaction(&req); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": err.Error()})
 		return
 	}

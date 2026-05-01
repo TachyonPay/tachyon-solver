@@ -379,13 +379,21 @@ type CreateTransactionRequest struct {
 	DepositTxHash   string `json:"depositTxHash,omitempty"`
 }
 
-// CompleteTransactionRequest is sent by the solver after settling to mark the record completed.
+// CompleteTransactionRequest is sent by the solver after settling.
+// It carries the full intent object so the relayer can upsert: if the record
+// already exists it is updated; if not, a new completed record is created.
 type CompleteTransactionRequest struct {
-	SourceChainID string `json:"sourceChainId" binding:"required"`
-	IntentID      string `json:"intentId" binding:"required"`
-	DepositTxHash string `json:"depositTxHash,omitempty"`
-	SolveTxHash   string `json:"solveTxHash,omitempty"`
-	SettleTxHash  string `json:"settleTxHash,omitempty"`
+	SourceChainID   string `json:"sourceChainId" binding:"required"`
+	IntentID        string `json:"intentId" binding:"required"`
+	UserAddress     string `json:"userAddress,omitempty"`
+	DestChainID     string `json:"destChainId,omitempty"`
+	TokenA          string `json:"tokenA,omitempty"`
+	TokenB          string `json:"tokenB,omitempty"`
+	AmountA         string `json:"amountA,omitempty"`
+	ExpectedAmountB string `json:"expectedAmountB,omitempty"`
+	DepositTxHash   string `json:"depositTxHash,omitempty"`
+	SolveTxHash     string `json:"solveTxHash,omitempty"`
+	SettleTxHash    string `json:"settleTxHash,omitempty"`
 }
 
 // RelayBatchItem is a single Safe transaction inside a POST /recipient/relay-batch request.
