@@ -205,6 +205,64 @@ func (r *Relayer) StoreRecipients(req *types.StoreRecipientsRequest) error {
 	return nil
 }
 
+// CreatePendingTransaction records a pending TransactionRecord. Idempotent: no-op if already exists.
+func (r *Relayer) CreatePendingTransaction(record *types.TransactionRecord) error {
+	existing, _ := r.store.GetTransactionRecord(record.SourceChainID, record.IntentID)
+	if existing != nil {
+		return nil
+	}
+	now := time.Now()
+	record.Status = "pending"
+	record.CreatedAt = now
+	record.UpdatedAt = now
+	return r.store.SaveTransactionRecord(record)
+}
+
+// CompleteTransaction upserts a TransactionRecord to completed status.
+// If the record already exists it is updated with the provided tx hashes.
+// If it does not exist (relayer never saw the IntentCreated event) a new
+// completed record is created from the full payload the solver sent.
+func (r *Relayer) CompleteTransaction(req *types.CompleteTransactionRequest) error {
+	record, err := r.store.GetTransactionRecord(req.SourceChainID, req.IntentID)
+	if err != nil {
+		return fmt.Errorf("failed to load transaction record: %w", err)
+	}
+
+	now := time.Now()
+	if record == nil {
+		record = &types.TransactionRecord{
+			IntentID:        req.IntentID,
+			UserAddress:     req.UserAddress,
+			SourceChainID:   req.SourceChainID,
+			DestChainID:     req.DestChainID,
+			TokenA:          req.TokenA,
+			TokenB:          req.TokenB,
+			AmountA:         req.AmountA,
+			ExpectedAmountB: req.ExpectedAmountB,
+			CreatedAt:       now,
+		}
+	}
+
+	record.Status = "completed"
+	if req.DepositTxHash != "" {
+		record.DepositTxHash = req.DepositTxHash
+	}
+	if req.SolveTxHash != "" {
+		record.SolveTxHash = req.SolveTxHash
+	}
+	if req.SettleTxHash != "" {
+		record.SettleTxHash = req.SettleTxHash
+	}
+	record.UpdatedAt = now
+	record.CompletedAt = &now
+	return r.store.SaveTransactionRecord(record)
+}
+
+// GetTransactionsByUser returns paginated transaction history for a user.
+func (r *Relayer) GetTransactionsByUser(userAddress, status string, page, limit int) ([]*types.TransactionRecord, int, error) {
+	return r.store.GetTransactionsByUser(userAddress, status, page, limit)
+}
+
 func (r *Relayer) GetRecipients(intentID string) (*types.RecipientInfo, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

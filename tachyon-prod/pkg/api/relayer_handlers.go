@@ -2,10 +2,12 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/zk-tachyon/tachyon-prod/pkg/middleware"
 	"github.com/zk-tachyon/tachyon-prod/pkg/relayer"
 	"github.com/zk-tachyon/tachyon-prod/pkg/types"
 )
@@ -44,12 +46,21 @@ func (api *RelayerAPI) RegisterRoutes(r *gin.Engine) {
 	r.POST("/recipient/deploy-safe", api.DeploySafe)
 	r.POST("/recipient/relay-proxy", api.RelayProxy)
 	r.POST("/recipient/relay-batch", api.RelayBatch)
+
+	// Transaction history endpoints (wallet-auth for FE, admin for solver)
+	txAuth := r.Group("/transactions")
+	txAuth.Use(middleware.WalletSignatureAuth())
+	{
+		txAuth.POST("", api.CreateTransaction)
+		txAuth.GET("", api.GetTransactions)
+	}
 }
 
 // RegisterAdminRoutes registers admin-only routes (call with auth middleware group)
 func (api *RelayerAPI) RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.GET("/list-stored-intents", api.ListStoredIntents)
 	r.DELETE("/delete-recipients/:intentId", api.DeleteRecipients)
+	r.POST("/transactions/complete", api.CompleteTransaction)
 }
 
 func (api *RelayerAPI) HealthCheck(c *gin.Context) {
@@ -456,6 +467,89 @@ func (api *RelayerAPI) RelayBatch(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, response)
+}
+
+// CreateTransaction records a pending intent immediately when FE submits it.
+// Authenticated via wallet signature; userAddress in body must match recovered signer.
+func (api *RelayerAPI) CreateTransaction(c *gin.Context) {
+	user := c.GetString("verified_address")
+
+	var req types.CreateTransactionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+
+	if !strings.EqualFold(req.UserAddress, user) {
+		c.JSON(http.StatusForbidden, gin.H{"success": false, "error": "userAddress must match authenticated wallet"})
+		return
+	}
+
+	record := &types.TransactionRecord{
+		IntentID:        req.IntentID,
+		UserAddress:     req.UserAddress,
+		SourceChainID:   req.SourceChainID,
+		DestChainID:     req.DestChainID,
+		TokenA:          req.TokenA,
+		TokenB:          req.TokenB,
+		AmountA:         req.AmountA,
+		ExpectedAmountB: req.ExpectedAmountB,
+		DepositTxHash:   req.DepositTxHash,
+	}
+	if err := api.relayer.CreatePendingTransaction(record); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "intentId": req.IntentID})
+}
+
+// GetTransactions returns paginated transaction history for the authenticated wallet.
+func (api *RelayerAPI) GetTransactions(c *gin.Context) {
+	user := c.GetString("verified_address")
+	status := c.Query("status")
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+
+	records, total, err := api.relayer.GetTransactionsByUser(user, status, page, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, types.TransactionPageResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	totalPages := total / limit
+	if total%limit != 0 {
+		totalPages++
+	}
+
+	c.JSON(http.StatusOK, types.TransactionPageResponse{
+		Success:      true,
+		Transactions: records,
+		Page:         page,
+		Limit:        limit,
+		Total:        total,
+		TotalPages:   totalPages,
+	})
+}
+
+// CompleteTransaction is called by the solver (via admin API key) to mark an intent as settled.
+// Upserts: creates the record from the full payload if it doesn't exist yet.
+func (api *RelayerAPI) CompleteTransaction(c *gin.Context) {
+	var req types.CompleteTransactionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+
+	if err := api.relayer.CompleteTransaction(&req); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "intentId": req.IntentID})
 }
 
 // GetIntentDetails retrieves complete intent details including all transaction hashes

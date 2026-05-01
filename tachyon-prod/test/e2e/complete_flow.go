@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/joho/godotenv"
@@ -197,6 +199,33 @@ func main() {
 
 	fmt.Printf("\n✅ Successfully created %d intents\n\n", len(createdIntents))
 
+	// Upsert test: pre-create a pending record for the SECOND intent only.
+	// Test 1 (Horizen→Base): no pending record → solver must CREATE the record from its full payload.
+	// Test 2 (Base→Horizen): pending record exists → solver must UPDATE it to "completed".
+	if len(createdIntents) >= 2 {
+		intent2 := createdIntents[1]
+		test2 := tests[1]
+		decimalsA2 := fetchTokenDecimals(ctx, test2.SourceClient, test2.TokenA)
+		decimalsB2 := fetchTokenDecimals(ctx, test2.DestClient, test2.TokenB)
+		amountA2 := utils.ParseToken(cfg.AmountA, decimalsA2)
+		expectedAmountB2 := utils.ParseToken(cfg.AmountB, decimalsB2)
+		fmt.Println("📝 [Test 2 only] Pre-creating pending record to test solver UPDATE path...")
+		err := recordPendingTransaction(
+			cfg.RelayerURL, wallet,
+			intent2.IntentID.String(),
+			test2.SourceChainID.String(),
+			test2.DestChainID.String(),
+			test2.TokenA, test2.TokenB,
+			amountA2.String(), expectedAmountB2.String(),
+			"",
+		)
+		if err != nil {
+			fmt.Printf("⚠️  Warning: Failed to pre-create pending record for test 2: %v\n", err)
+		} else {
+			fmt.Println("✅ Pending record created — solver will UPDATE this to completed")
+		}
+	}
+
 	// Wait for solver to process all intents
 	fmt.Println(strings.Repeat("=", 80))
 	fmt.Printf("⏳ Waiting 2 minutes for solver to process all intents...\n")
@@ -247,6 +276,36 @@ func main() {
 			fmt.Println("   Destination Chain: ✅ Solved")
 		} else {
 			fmt.Println("   Destination Chain: ❌ Not Solved")
+		}
+
+		// Verify relayer transaction record — solver posts the full object so relayer can
+		// upsert: Test 1 verifies CREATE from scratch; Test 2 verifies UPDATE of existing pending.
+		upsertLabel := "CREATE (no pre-existing record)"
+		if i == 1 {
+			upsertLabel = "UPDATE (pre-existing pending record)"
+		}
+		fmt.Printf("   Upsert path: %s\n", upsertLabel)
+		txRecord := getTransactionRecord(cfg.RelayerURL, wallet, intent.IntentID.String())
+		if txRecord == nil {
+			fmt.Println("   Relayer TX Record: ⚠️  not found (solver may not have notified yet)")
+		} else {
+			fmt.Printf("   Relayer TX Record:\n")
+			fmt.Printf("     status:          %s\n", txRecord.Status)
+			fmt.Printf("     userAddress:     %s\n", txRecord.UserAddress)
+			fmt.Printf("     sourceChainId:   %s\n", txRecord.SourceChainID)
+			fmt.Printf("     destChainId:     %s\n", txRecord.DestChainID)
+			fmt.Printf("     tokenA:          %s\n", txRecord.TokenA)
+			fmt.Printf("     tokenB:          %s\n", txRecord.TokenB)
+			fmt.Printf("     amountA:         %s\n", txRecord.AmountA)
+			fmt.Printf("     expectedAmountB: %s\n", txRecord.ExpectedAmountB)
+			fmt.Printf("     depositTxHash:   %s\n", txRecord.DepositTxHash)
+			fmt.Printf("     solveTxHash:     %s\n", txRecord.SolveTxHash)
+			fmt.Printf("     settleTxHash:    %s\n", txRecord.SettleTxHash)
+			if txRecord.Status == "completed" {
+				fmt.Println("   Relayer TX Record: ✅ completed")
+			} else {
+				fmt.Printf("   Relayer TX Record: ⚠️  status=%s\n", txRecord.Status)
+			}
 		}
 
 		if sourceCompleted && destSolved {
@@ -903,6 +962,101 @@ func signDeploySafe(key *ecdsa.PrivateKey, stealthAddress common.Address, chainI
 	digest := eip712Hash(structHash)
 	sig, _ := crypto.Sign(digest.Bytes(), key)
 	return sig
+}
+
+// walletAuthHeaders produces X-Signature / X-Timestamp headers for WalletSignatureAuth.
+// The middleware expects an EIP-712 AuthSession(uint256 timestamp) signature under the
+// TachyonStealth v1 domain — matching RecoverAuthSession in pkg/stealth/eip712.go.
+func walletAuthHeaders(privKey *ecdsa.PrivateKey) map[string]string {
+	ts := time.Now().Unix()
+
+	domainTypeHash := crypto.Keccak256Hash([]byte("EIP712Domain(string name,string version)"))
+	domainSeparator := crypto.Keccak256Hash(
+		domainTypeHash.Bytes(),
+		crypto.Keccak256([]byte("TachyonStealth")),
+		crypto.Keccak256([]byte("1")),
+	)
+	authSessionTypeHash := crypto.Keccak256Hash([]byte("AuthSession(uint256 timestamp)"))
+	structHash := crypto.Keccak256Hash(
+		authSessionTypeHash.Bytes(),
+		common.LeftPadBytes(big.NewInt(ts).Bytes(), 32),
+	)
+	digest := crypto.Keccak256Hash([]byte{0x19, 0x01}, domainSeparator.Bytes(), structHash.Bytes())
+
+	sig, _ := crypto.Sign(digest.Bytes(), privKey)
+	return map[string]string{
+		"X-Signature": hexutil.Encode(sig),
+		"X-Timestamp": strconv.FormatInt(ts, 10),
+	}
+}
+
+// recordPendingTransaction calls POST /transactions on the relayer immediately
+// after the deposit tx mines, so FE can see "pending" without waiting for the solver.
+func recordPendingTransaction(relayerURL string, wallet *utils.TestWallet, intentID, sourceChainID, destChainID, tokenA, tokenB, amountA, expectedAmountB, depositTxHash string) error {
+	body, _ := json.Marshal(map[string]string{
+		"intentId":        intentID,
+		"userAddress":     wallet.Address.Hex(),
+		"sourceChainId":   sourceChainID,
+		"destChainId":     destChainID,
+		"tokenA":          tokenA,
+		"tokenB":          tokenB,
+		"amountA":         amountA,
+		"expectedAmountB": expectedAmountB,
+		"depositTxHash":   depositTxHash,
+	})
+	req, _ := http.NewRequest(http.MethodPost, relayerURL+"/transactions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range walletAuthHeaders(wallet.PrivateKey) {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("POST /transactions returned %d: %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+type txRecord struct {
+	IntentID        string `json:"intentId"`
+	UserAddress     string `json:"userAddress"`
+	SourceChainID   string `json:"sourceChainId"`
+	DestChainID     string `json:"destChainId"`
+	TokenA          string `json:"tokenA"`
+	TokenB          string `json:"tokenB"`
+	AmountA         string `json:"amountA"`
+	ExpectedAmountB string `json:"expectedAmountB"`
+	Status          string `json:"status"`
+	DepositTxHash   string `json:"depositTxHash"`
+	SolveTxHash     string `json:"solveTxHash"`
+	SettleTxHash    string `json:"settleTxHash"`
+}
+
+// getTransactionRecord calls GET /transactions and returns the full record for a given intentId.
+func getTransactionRecord(relayerURL string, wallet *utils.TestWallet, intentID string) *txRecord {
+	req, _ := http.NewRequest(http.MethodGet, relayerURL+"/transactions", nil)
+	for k, v := range walletAuthHeaders(wallet.PrivateKey) {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Transactions []*txRecord `json:"transactions"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+	for _, t := range result.Transactions {
+		if t.IntentID == intentID {
+			return t
+		}
+	}
+	return nil
 }
 
 // getIntentDetailsWithRetries fetches settlement details with retry logic

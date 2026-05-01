@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/big"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -1311,7 +1312,7 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 	}
 	s.mu.RUnlock()
 
-	go s.settleIntent(ctx, sourceNetwork, intentID, intentID, destClient.GetSolverAddress(), destNetwork, depositTxHash, solveTxHash)
+	go s.settleIntent(ctx, sourceNetwork, intentID, intentID, destClient.GetSolverAddress(), destNetwork, depositTxHash, solveTxHash, intent, sourceChainCfg.ChainID.String())
 }
 
 // getRecipientsFromRelayer fetches recipient information from the relayer.
@@ -1377,7 +1378,7 @@ func (s *Solver) getRecipientsFromRelayer(intentID string, sourceChainID string)
 
 // settleIntent calls the relayer to settle an intent on the source chain
 // Retries with exponential backoff to handle RPC propagation delays on slow chains like Sepolia
-func (s *Solver) settleIntent(ctx context.Context, network string, chain1IntentID, chain2IntentID *big.Int, solverAddr common.Address, destChainName string, depositTxHash, solveTxHash string) {
+func (s *Solver) settleIntent(ctx context.Context, network string, chain1IntentID, chain2IntentID *big.Int, solverAddr common.Address, destChainName string, depositTxHash, solveTxHash string, intent *types.Intent, sourceChainIDStr string) {
 	settleReq := types.SettleRequest{
 		IntentID:         chain1IntentID.String(),
 		Network:          network,
@@ -1471,7 +1472,7 @@ func (s *Solver) settleIntent(ctx context.Context, network string, chain1IntentI
 			if settleTxHash == "" {
 				settleTxHash = settleResp.TransactionHash
 			}
-			s.completeTransactionRecord(network, chain1IntentID.String(), depositTxHash, solveTxHash, settleTxHash)
+			s.completeTransactionRecord(network, chain1IntentID.String(), depositTxHash, solveTxHash, settleTxHash, intent, sourceChainIDStr)
 
 			// Update status
 			key := fmt.Sprintf("%s-%s", network, chain1IntentID.String())
@@ -1570,20 +1571,68 @@ func (s *Solver) saveTransactionRecord(intent *types.Intent, networkKey string) 
 }
 
 // completeTransactionRecord marks a transaction record as completed and attaches all tx hashes.
-func (s *Solver) completeTransactionRecord(sourceChainID, intentID, depositTxHash, solveTxHash, settleTxHash string) {
-	record, err := s.store.GetTransactionRecord(sourceChainID, intentID)
-	if err != nil || record == nil {
+// It also notifies the relayer so the FE can see the final status via GET /transactions.
+func (s *Solver) completeTransactionRecord(sourceChainKey, intentID, depositTxHash, solveTxHash, settleTxHash string, intent *types.Intent, sourceChainIDStr string) {
+	record, err := s.store.GetTransactionRecord(sourceChainKey, intentID)
+	if err == nil && record != nil {
+		now := time.Now()
+		record.Status = "completed"
+		record.DepositTxHash = depositTxHash
+		record.SolveTxHash = solveTxHash
+		record.SettleTxHash = settleTxHash
+		record.UpdatedAt = now
+		record.CompletedAt = &now
+		if err := s.store.SaveTransactionRecord(record); err != nil {
+			log.WithError(err).WithField("intentID", intentID).Error("Failed to update transaction record to completed")
+		}
+	}
+
+	go s.notifyRelayerComplete(sourceChainKey, intentID, depositTxHash, solveTxHash, settleTxHash, intent, sourceChainIDStr)
+}
+
+// notifyRelayerComplete POSTs the full intent object to the relayer so it can upsert the record.
+func (s *Solver) notifyRelayerComplete(sourceChainKey, intentID, depositTxHash, solveTxHash, settleTxHash string, intent *types.Intent, sourceChainIDStr string) {
+	if s.cfg.RelayerURL == "" {
 		return
 	}
-	now := time.Now()
-	record.Status = "completed"
-	record.DepositTxHash = depositTxHash
-	record.SolveTxHash = solveTxHash
-	record.SettleTxHash = settleTxHash
-	record.UpdatedAt = now
-	record.CompletedAt = &now
-	if err := s.store.SaveTransactionRecord(record); err != nil {
-		log.WithError(err).WithField("intentID", intentID).Error("Failed to update transaction record to completed")
+	adminKey := os.Getenv("ADMIN_API_KEY")
+	if adminKey == "" {
+		return
+	}
+
+	payload := types.CompleteTransactionRequest{
+		SourceChainID: sourceChainKey,
+		IntentID:      intentID,
+		DepositTxHash: depositTxHash,
+		SolveTxHash:   solveTxHash,
+		SettleTxHash:  settleTxHash,
+	}
+	if intent != nil {
+		payload.UserAddress = intent.User
+		payload.DestChainID = intent.DestChainId.String()
+		payload.TokenA = intent.TokenA
+		payload.TokenB = intent.TokenB
+		payload.AmountA = intent.AmountA.String()
+		payload.ExpectedAmountB = intent.ExpectedAmountB.String()
+	}
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequest(http.MethodPost, s.cfg.RelayerURL+"/admin/transactions/complete", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", adminKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.WithError(err).WithField("intentID", intentID).Warn("Failed to notify relayer of completed transaction")
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		log.WithFields(log.Fields{"intentID": intentID, "status": resp.StatusCode, "body": string(b)}).
+			Warn("Relayer rejected completed transaction notification")
 	}
 }
 
