@@ -67,10 +67,27 @@ const safeProxyFactoryABI = `[{"inputs":[{"internalType":"address","name":"_sing
 
 const safeSingletonABI = `[{"inputs":[{"internalType":"address[]","name":"_owners","type":"address[]"},{"internalType":"uint256","name":"_threshold","type":"uint256"},{"internalType":"address","name":"to","type":"address"},{"internalType":"bytes","name":"data","type":"bytes"},{"internalType":"address","name":"fallbackHandler","type":"address"},{"internalType":"address","name":"paymentToken","type":"address"},{"internalType":"uint256","name":"payment","type":"uint256"},{"internalType":"address payable","name":"paymentReceiver","type":"address"}],"name":"setup","outputs":[],"stateMutability":"nonpayable","type":"function"}]`
 
+// DeploySafeOpts overrides gas behavior of DeploySafe. Both fields are
+// optional — zero values fall back to the function's defaults
+// (500k gas limit, SuggestGasPrice from the node).
+type DeploySafeOpts struct {
+	GasLimit uint64   // overrides the default 500k cap
+	GasPrice *big.Int // overrides SuggestGasPrice (set explicitly when the node's suggestion races the base fee)
+}
+
 // DeploySafe deploys a new Safe proxy with the given owner address.
 // The owner should be the stealth address that controls this Safe.
 // Returns the transaction and the predicted Safe address.
 func (c *Client) DeploySafe(ctx context.Context, ownerAddress common.Address, saltNonce *big.Int) (*types.Transaction, common.Address, error) {
+	return c.DeploySafeWithOpts(ctx, ownerAddress, saltNonce, DeploySafeOpts{})
+}
+
+// DeploySafeWithOpts is DeploySafe with explicit gas overrides — used
+// by ops scripts on chains where the canonical 500k gas cap is too
+// tight (e.g. MegaETH burns ~493k just for the proxy + initializer),
+// or where the node's suggested gas price races the actual base fee
+// (Arbitrum's 0.02 gwei vs 0.020006 gwei).
+func (c *Client) DeploySafeWithOpts(ctx context.Context, ownerAddress common.Address, saltNonce *big.Int, opts DeploySafeOpts) (*types.Transaction, common.Address, error) {
 	// Parse ABIs
 	proxyFactoryABI, err := abi.JSON(strings.NewReader(safeProxyFactoryABI))
 	if err != nil {
@@ -118,6 +135,12 @@ func (c *Client) DeploySafe(ctx context.Context, ownerAddress common.Address, sa
 		return nil, common.Address{}, err
 	}
 	auth.GasLimit = uint64(500000) // Safe deployment needs more gas
+	if opts.GasLimit != 0 {
+		auth.GasLimit = opts.GasLimit
+	}
+	if opts.GasPrice != nil {
+		auth.GasPrice = opts.GasPrice
+	}
 
 	tx, err := proxyFactory.Transact(auth, "createProxyWithNonce",
 		addrs.Singleton,

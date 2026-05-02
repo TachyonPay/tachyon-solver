@@ -114,6 +114,13 @@ func (c *Client) GetSafeAddress() common.Address {
 	return c.safeAddress
 }
 
+// SuggestGasPrice exposes the underlying eth_gasPrice estimate so ops
+// scripts can build their own bumped fee strategies without going
+// through getTransactOpts.
+func (c *Client) SuggestGasPrice(ctx context.Context) (*big.Int, error) {
+	return c.ethClient.SuggestGasPrice(ctx)
+}
+
 // GetSolverAddress returns the effective solver address: the Safe if configured, otherwise the EOA.
 // This is the address that appears as msg.sender for all token-moving transactions.
 func (c *Client) GetSolverAddress() common.Address {

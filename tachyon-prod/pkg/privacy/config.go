@@ -92,6 +92,7 @@ func LoadConfig() (*Config, error) {
 		{ChainIDEthereum, "PRIVACY_RPC_ETHEREUM", "TEE_SAFE_ETHEREUM"},
 		{ChainIDArbitrum, "PRIVACY_RPC_ARBITRUM", "TEE_SAFE_ARBITRUM"},
 		{ChainIDOptimism, "PRIVACY_RPC_OPTIMISM", "TEE_SAFE_OPTIMISM"},
+		{ChainIDHorizen, "PRIVACY_RPC_HORIZEN", "TEE_SAFE_HORIZEN"},
 	} {
 		rpc := os.Getenv(c.rpcEnv)
 		safeStr := os.Getenv(c.safeEnv)
