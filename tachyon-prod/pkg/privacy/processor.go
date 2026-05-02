@@ -393,17 +393,23 @@ func (p *Processor) dispatchIntent(ctx context.Context, intent *BridgeIntent) {
 	}()
 }
 
-// waitForDelivery polls LI.FI's /v1/status endpoint for cross-chain
-// delivery confirmation. LI.FI tracks the bundled bridge tx end-to-end
-// regardless of whether the underlying provider is Across, Relay, or a
-// native gateway, and reports DONE / FAILED / PENDING accordingly.
+// waitForDelivery resolves a `bridging` intent to either `delivered`
+// or `failed` by polling the appropriate cross-chain confirmation
+// service. Stargate / OFT routes use the public LayerZero scan API
+// (which knows about Stargate v2 + ZEN OFT). LI.FI routes use
+// LI.FI's /v1/status (which tracks Across/Relay/native gateway).
 //
-// We accept either DONE (terminal success) or a PENDING with a non-empty
-// receiving.txHash (the destination tx was at least seen). On a final
-// FAILED we mark the intent failed.
+// On DELIVERED → records DeliveredTxHash, transitions to
+// StatusDelivered, and publishes to the relayer's transaction
+// history. On FAILED → marks the intent failed (user can /refund).
 func (p *Processor) waitForDelivery(ctx context.Context, intent *BridgeIntent) {
 	if intent.BridgeTxHash == "" {
 		_ = p.store.SetError(intent.SessionID, "waitForDelivery: missing bridge tx hash")
+		return
+	}
+
+	if IsStargateRoute(intent.SourceChainID, intent.DestChainID, intent.SourceToken, intent.DestToken) {
+		p.waitForLZDelivery(ctx, intent)
 		return
 	}
 
@@ -456,6 +462,44 @@ func (p *Processor) waitForDelivery(ctx context.Context, intent *BridgeIntent) {
 		default:
 			// PENDING / NOT_FOUND — keep polling.
 		}
+	}
+}
+
+// waitForLZDelivery is the Stargate / LZ-OFT counterpart to
+// waitForDelivery's LI.FI-status loop. It polls layerzero-scan by the
+// source-chain tx hash, terminating on DELIVERED or FAILED.
+func (p *Processor) waitForLZDelivery(ctx context.Context, intent *BridgeIntent) {
+	pollCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-p.stopCh:
+			cancel()
+		case <-pollCtx.Done():
+		}
+	}()
+
+	status, err := waitLZDelivery(pollCtx, intent.BridgeTxHash, 10*time.Second, 20*time.Minute)
+	if err != nil {
+		log.WithError(err).WithField("sessionID", intent.SessionID).Warn("LZ delivery wait failed")
+		_ = p.store.SetError(intent.SessionID, "lz delivery: "+err.Error())
+		return
+	}
+	if status.DstTxHash != "" {
+		_ = p.store.SetTxHash(intent.SessionID, "delivered", status.DstTxHash)
+	}
+	if err := p.store.ChangeStatus(intent.SessionID, StatusBridging, StatusDelivered); err != nil {
+		log.WithError(err).WithField("sessionID", intent.SessionID).Warn("ChangeStatus to delivered failed")
+	}
+	log.WithFields(log.Fields{
+		"sessionID":  intent.SessionID,
+		"dstChain":   intent.DestChainID,
+		"deliveryTx": status.DstTxHash,
+	}).Info("Privacy bridge delivery confirmed (LZ scan status=DELIVERED)")
+	if fresh, err := p.store.Get(intent.SessionID); err == nil && fresh != nil {
+		PublishDelivered(p.cfg, fresh)
+	} else {
+		PublishDelivered(p.cfg, intent)
 	}
 }
 
