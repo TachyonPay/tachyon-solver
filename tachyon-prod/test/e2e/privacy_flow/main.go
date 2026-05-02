@@ -1,10 +1,11 @@
-// Privacy bridge e2e: Base USDC → MegaETH USDT0 via the privacy-router.
+// Privacy bridge e2e: Base USDC → <dest> via the privacy-router.
 //
 // 1. GET /pubkey — the service's ECIES public key
-// 2. Build a BridgeIntentPayload (Base USDC → MegaETH USDT0, recipient EOA)
+// 2. Build a BridgeIntentPayload (Base USDC → dest token on dest chain)
 // 3. ECIES-encrypt + POST /bridge → sessionID
 // 4. Send the source USDC from PRIVATE_KEY's EOA to TEE_SAFE_BASE on chain
 // 5. Poll /bridge/:id every 8s, print status transitions
+// 6. Once delivered, read dest token balance at the predicted stealth Safe
 //
 // Run from tachyon-prod root:
 //
@@ -12,11 +13,13 @@
 //
 // Env (loaded from ../../.env):
 //
-//	PRIVACY_URL            base URL of the privacy-router (default http://localhost:3013)
-//	PRIVATE_KEY            EOA used as the "user" — funds the bridge
-//	PRIVACY_TEE_SAFE_BASE  TEE Safe address on Base (default = current solver Safe)
-//	PRIVACY_TEST_AMOUNT    amount in USDC atomic units (default 50000 = $0.05)
-//	PRIVACY_TEST_DEST      dest address on MegaETH (default = EOA)
+//	PRIVACY_URL              base URL of the privacy-router (default http://localhost:3013)
+//	PRIVATE_KEY              EOA used as the "user" — funds the bridge
+//	PRIVACY_TEE_SAFE_BASE    TEE Safe address on Base (default = current solver Safe)
+//	PRIVACY_TEST_AMOUNT      amount in USDC atomic units (default 50000 = $0.05)
+//	PRIVACY_TEST_DEST        dest address override (default = predicted stealth Safe)
+//	PRIVACY_TEST_DEST_CHAIN  dest chainID (default 4326 / MegaETH)
+//	PRIVACY_TEST_DEST_TOKEN  dest token symbol (default USDT0)
 package main
 
 import (
@@ -46,13 +49,42 @@ import (
 )
 
 const (
-	defaultPrivacyURL  = "http://localhost:3013"
+	defaultPrivacyURL  = "http://localhost:3003"
 	defaultTeeSafeBase = "0xa4A8E2dDA54321E257615fef9FF467401D1C17D4"
 	baseUSDC           = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 	baseRPC            = "https://base-mainnet.g.alchemy.com/v2/ZnxNrK14O1olpqoj-KVkP"
 	chainBase          = "8453"
 	chainMegaETH       = "4326"
 )
+
+// destSpec is the dest-chain-specific bundle the test needs to verify
+// delivery. The map below covers every (chainID, symbol) the privacy
+// router publishes today; new routes need an entry here too.
+type destSpec struct {
+	chainID  string
+	label    string         // human label used in logs
+	rpcURL   string         // RPC endpoint for balance reads
+	token    string         // canonical symbol the privacy router expects in payload.DestToken
+	tokenAt  common.Address // ERC-20 contract on dest chain (zero = native gas token)
+	decimals uint8
+}
+
+func resolveDest(chainID, token string) (destSpec, error) {
+	tokU := strings.ToUpper(token)
+	keys := map[string]destSpec{
+		"4326:USDT0":   {chainID: "4326", label: "MegaETH", rpcURL: "https://mainnet.megaeth.com/rpc", token: "USDT0", tokenAt: common.HexToAddress("0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb"), decimals: 6},
+		"4326:ETH":     {chainID: "4326", label: "MegaETH", rpcURL: "https://mainnet.megaeth.com/rpc", token: "ETH", decimals: 18},
+		"26514:USDC.E": {chainID: "26514", label: "Horizen", rpcURL: "https://horizen.calderachain.xyz/http", token: "USDC.E", tokenAt: common.HexToAddress("0xDF7108f8B10F9b9eC1aba01CCa057268cbf86B6c"), decimals: 6},
+		"26514:ZEN":    {chainID: "26514", label: "Horizen", rpcURL: "https://horizen.calderachain.xyz/http", token: "ZEN", tokenAt: common.HexToAddress("0x57da2D504bf8b83Ef304759d9f2648522D7a9280"), decimals: 18},
+		"1:USDC":       {chainID: "1", label: "Ethereum", rpcURL: "https://eth-mainnet.g.alchemy.com/v2/ZnxNrK14O1olpqoj-KVkP", token: "USDC", tokenAt: common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"), decimals: 6},
+		"42161:USDC":   {chainID: "42161", label: "Arbitrum", rpcURL: "https://arb-mainnet.g.alchemy.com/v2/ZnxNrK14O1olpqoj-KVkP", token: "USDC", tokenAt: common.HexToAddress("0xaf88d065e77c8cC2239327C5EDb3A432268e5831"), decimals: 6},
+		"10:USDC":      {chainID: "10", label: "Optimism", rpcURL: "https://opt-mainnet.g.alchemy.com/v2/ZnxNrK14O1olpqoj-KVkP", token: "USDC", tokenAt: common.HexToAddress("0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"), decimals: 6},
+	}
+	if d, ok := keys[chainID+":"+tokU]; ok {
+		return d, nil
+	}
+	return destSpec{}, fmt.Errorf("no destSpec for (chainID=%s, token=%s); add it to resolveDest()", chainID, tokU)
+}
 
 type bridgeIntentPayload struct {
 	SessionID       string `json:"sessionId"`
@@ -122,14 +154,21 @@ func main() {
 		die("PRIVACY_TEST_AMOUNT %q is not a number", amountStr)
 	}
 
-	fmt.Println("Privacy bridge e2e (Base USDC → MegaETH USDT0)")
+	destChainID := envOr("PRIVACY_TEST_DEST_CHAIN", chainMegaETH)
+	destToken := envOr("PRIVACY_TEST_DEST_TOKEN", "USDT0")
+	dst, err := resolveDest(destChainID, destToken)
+	if err != nil {
+		die("resolveDest: %v", err)
+	}
+
+	fmt.Printf("Privacy bridge e2e (Base USDC → %s %s)\n", dst.label, dst.token)
 	fmt.Printf("  router:           %s\n", privacyURL)
 	fmt.Printf("  user EOA:         %s\n", eoa.Hex())
 	fmt.Printf("  TEE Safe Base:    %s\n", teeSafeBase.Hex())
 	fmt.Printf("  amount:           %s atomic ($%s USDC)\n", amount, formatTokenAmount(amount, 6))
 	fmt.Printf("  stealth owner:    %s  (private key NOT persisted)\n", stealthOwner.Hex())
 	fmt.Printf("  predicted Safe:   %s  (canonical v1.3.0, undeployed)\n", predictedSafe.Hex())
-	fmt.Printf("  dest (MegaETH):   %s\n\n", dest.Hex())
+	fmt.Printf("  dest (%s):    %s\n\n", dst.label, dest.Hex())
 
 	fmt.Println("[1] fetching service pubkey...")
 	pubHex, err := fetchPubKey(privacyURL)
@@ -150,8 +189,8 @@ func main() {
 		SourceToken:     "USDC",
 		InboundSafe:     eoa.Hex(),
 		AmountStr:       amount.String(),
-		DestChainID:     chainMegaETH,
-		DestToken:       "USDT0",
+		DestChainID:     dst.chainID,
+		DestToken:       dst.token,
 		DestStealthSafe: dest.Hex(),
 		UnixTimestamp:   time.Now().Unix(),
 	}
@@ -207,15 +246,15 @@ func main() {
 			fmt.Printf("   bridgeTxHash:    %s\n", s.BridgeTxHash)
 			fmt.Printf("   deliveredTxHash: %s\n", s.DeliveredTxHash)
 
-			// Verify the predicted Safe address actually received USDT0
-			// on MegaETH, even though the Safe contract isn't deployed.
-			bal, err := readUSDT0OnMegaETH(dest)
+			// Verify the predicted Safe address actually received the dest
+			// token on the dest chain, even though the Safe isn't deployed.
+			bal, err := readERC20Balance(dst.rpcURL, dst.tokenAt, dest)
 			if err != nil {
 				fmt.Printf("\n⚠️  could not verify dest balance: %v\n", err)
 			} else {
-				fmt.Printf("\n💰 USDT0 balance at predicted Safe %s on MegaETH: %s atomic ($%s)\n",
-					dest.Hex(), bal, formatTokenAmount(bal, 6))
-				code, _ := readBytecode(dest)
+				fmt.Printf("\n💰 %s balance at predicted Safe %s on %s: %s atomic ($%s)\n",
+					dst.token, dest.Hex(), dst.label, bal, formatTokenAmount(bal, int(dst.decimals)))
+				code, _ := readBytecodeOn(dst.rpcURL, dest)
 				if code == "0x" || code == "" {
 					fmt.Printf("   📦 Safe NOT deployed yet — funds sit at the predicted CREATE2 address\n")
 					fmt.Printf("      Owner can deploy v1.3.0 SafeProxy via factory %s\n", blockchain.SafeProxyFactoryAddress.Hex())
@@ -359,20 +398,22 @@ func sendUSDC(priv *ecdsa.PrivateKey, from, to common.Address, amount *big.Int) 
 	return signedTx.Hash().Hex(), nil
 }
 
-// readUSDT0OnMegaETH reads USDT0.balanceOf(holder) on MegaETH mainnet.
-// Used to verify the privacy bridge actually delivered tokens to the
-// predicted Safe address.
-func readUSDT0OnMegaETH(holder common.Address) (*big.Int, error) {
+// readERC20Balance reads token.balanceOf(holder) on the chain whose
+// RPC is rpcURL. token == zero is reserved for native gas tokens —
+// we surface eth_getBalance instead so ETH-dest routes still verify.
+func readERC20Balance(rpcURL string, token, holder common.Address) (*big.Int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	client, err := ethclient.Dial("https://mainnet.megaeth.com/rpc")
+	client, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		return nil, err
 	}
 	defer client.Close()
-	usdt0 := common.HexToAddress("0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb")
+	if (token == common.Address{}) {
+		return client.BalanceAt(ctx, holder, nil)
+	}
 	data := append([]byte{0x70, 0xa0, 0x82, 0x31}, common.LeftPadBytes(holder.Bytes(), 32)...)
-	out, err := client.CallContract(ctx, ethereum.CallMsg{To: &usdt0, Data: data}, nil)
+	out, err := client.CallContract(ctx, ethereum.CallMsg{To: &token, Data: data}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -382,11 +423,12 @@ func readUSDT0OnMegaETH(holder common.Address) (*big.Int, error) {
 	return new(big.Int).SetBytes(out[:32]), nil
 }
 
-// readBytecode returns the contract bytecode at addr on MegaETH (or "0x" if none).
-func readBytecode(addr common.Address) (string, error) {
+// readBytecodeOn returns the contract bytecode at addr on the chain
+// at rpcURL (or "0x" if none — i.e. the Safe hasn't been deployed yet).
+func readBytecodeOn(rpcURL string, addr common.Address) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	client, err := ethclient.Dial("https://mainnet.megaeth.com/rpc")
+	client, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		return "", err
 	}

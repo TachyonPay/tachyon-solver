@@ -114,8 +114,9 @@ func main() {
 	fmt.Printf("🔐 RegisterTypeHash:         %x\n", registerStealthTypeHash)
 	fmt.Println("🚀 Starting Multi-Chain E2E Test")
 	fmt.Println("Testing 2 bidirectional intent flows:")
-	fmt.Println("  1. Horizen → Base Sepolia (WETH)")
-	fmt.Println("  2. Base Sepolia → Horizen (USDC)\n")
+	fmt.Println("  1. Horizen → Base (USDC.e → USDC)")
+	fmt.Println("  2. Base → Horizen (USDC → USDC.e)")
+	fmt.Println()
 
 	ctx := context.Background()
 
@@ -164,16 +165,17 @@ func main() {
 	bridgeBase := bind.NewBoundContract(common.HexToAddress(cfg.BridgeBaseAddr), bridgeABI, baseClient, baseClient, baseClient)
 
 	// Get token addresses from env
-	tokenWETH_Horizen := os.Getenv("TOKEN_WETH_HORIZEN")
-	tokenWETH_Base := os.Getenv("TOKEN_WETH_BASE")
 	tokenUSDC_Horizen := os.Getenv("TOKEN_USDC_HORIZEN")
 	tokenUSDC_Base := os.Getenv("TOKEN_USDC_BASE")
 
-	// Define test scenarios
+	// Define test scenarios — both legs use USDC ↔ USDC.e so a single
+	// stable balance on each side covers the round-trip. The previous
+	// WETH leg required WETH on Horizen which most operator wallets
+	// don't carry.
 	tests := []IntentTest{
 		{
 			TestNum: 1, SourceChain: "horizen", DestChain: "base",
-			TokenA: tokenWETH_Horizen, TokenB: tokenWETH_Base,
+			TokenA: tokenUSDC_Horizen, TokenB: tokenUSDC_Base,
 			SourceClient: horizenClient, DestClient: baseClient,
 			SourceBridge: bridgeHorizen, DestBridge: bridgeBase,
 			SourceChainID: horizenChainID, DestChainID: baseChainID,
@@ -476,8 +478,8 @@ func main() {
 	fmt.Printf("\n📊 Bridge Results: %d/%d intents completed successfully\n", successCount, len(createdIntents))
 	fmt.Printf("📊 Stealth Results: %d/%d recipient flows passed\n", stealthSuccessCount, stealthTotalTests)
 	fmt.Println("\n✅ Test Scenarios:")
-	fmt.Println("   ✓ Horizen → Base Sepolia (WETH)")
-	fmt.Println("   ✓ Base Sepolia → Horizen (USDC)")
+	fmt.Println("   ✓ Horizen → Base (USDC.e → USDC)")
+	fmt.Println("   ✓ Base → Horizen (USDC → USDC.e)")
 	fmt.Println("\n🔏 Stealth Flow Tested:")
 	fmt.Println("   ✓ Recipient registration (TEE key generation)")
 	fmt.Println("   ✓ Stealth address + Safe address generation per intent")
