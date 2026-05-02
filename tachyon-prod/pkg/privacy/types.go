@@ -16,6 +16,7 @@ const (
 	StatusBridging  Status = "bridging"  // Stargate send submitted from TEE → dest stealth
 	StatusDelivered Status = "delivered" // verified delivery on dest chain
 	StatusFailed    Status = "failed"    // unrecoverable error (kept for visibility)
+	StatusRefunded  Status = "refunded"  // funds returned from TEE Safe to user EOA after a swept/failed intent
 )
 
 // BridgeIntent is a single user's bridge request after decryption.
@@ -65,6 +66,7 @@ type BridgeIntent struct {
 	SweepTxHash    string `json:"sweepTxHash,omitempty"`
 	BridgeTxHash   string `json:"bridgeTxHash,omitempty"`
 	DeliveredTxHash string `json:"deliveredTxHash,omitempty"`
+	RefundTxHash   string `json:"refundTxHash,omitempty"` // populated when /refund is called
 
 	// Error message captured if Status == StatusFailed.
 	Error string `json:"error,omitempty"`
@@ -125,5 +127,7 @@ type StatusResponse struct {
 	SweepTxHash     string    `json:"sweepTxHash,omitempty"`
 	BridgeTxHash    string    `json:"bridgeTxHash,omitempty"`
 	DeliveredTxHash string    `json:"deliveredTxHash,omitempty"`
+	RefundTxHash    string    `json:"refundTxHash,omitempty"`
+	Refundable      bool      `json:"refundable"` // true iff status ∈ {swept, failed} and not yet refunded
 	Error           string    `json:"error,omitempty"`
 }

@@ -249,6 +249,52 @@ func (b *Bridger) sendLifi(ctx context.Context, intent *BridgeIntent) (string, e
 	return tx.Hash().Hex(), nil
 }
 
+// Refund returns an `intent.Amount` of `intent.SourceToken` from the
+// TEE Safe on `intent.SourceChainID` to the user's original EOA
+// (`intent.UserAddress`). Caller must have validated state already
+// — Refund itself only checks that the chain is configured and the
+// token resolves to a real contract.
+//
+// Returns the on-chain tx hash. The Safe execTx is signed with the
+// TEE keys and submitted via the relayer (gas paid by relayer EOA),
+// same as every other privacy-router on-chain action.
+func (b *Bridger) Refund(ctx context.Context, intent *BridgeIntent) (string, error) {
+	src := intent.SourceChainID
+	if _, ok := b.cfg.Chains[src]; !ok {
+		return "", fmt.Errorf("source chain %s not configured", src)
+	}
+	if intent.Amount == nil || intent.Amount.Sign() <= 0 {
+		return "", fmt.Errorf("intent amount %v is not positive", intent.Amount)
+	}
+	srcTokenAddr := TokenAddress(src, intent.SourceToken)
+	if srcTokenAddr == (common.Address{}) {
+		return "", fmt.Errorf("no token address for %s on chain %s", intent.SourceToken, src)
+	}
+	if !common.IsHexAddress(intent.UserAddress) {
+		return "", fmt.Errorf("intent.UserAddress %q invalid", intent.UserAddress)
+	}
+	user := common.HexToAddress(intent.UserAddress)
+
+	// transfer(address,uint256) selector = 0xa9059cbb
+	data := append([]byte{0xa9, 0x05, 0x9c, 0xbb},
+		append(common.LeftPadBytes(user.Bytes(), 32),
+			common.LeftPadBytes(intent.Amount.Bytes(), 32)...)...)
+
+	log.WithFields(log.Fields{
+		"sessionID": intent.SessionID,
+		"chain":     src,
+		"token":     srcTokenAddr.Hex(),
+		"to":        user.Hex(),
+		"amount":    intent.Amount.String(),
+	}).Info("Privacy bridge: refund initiated")
+
+	tx, _, err := b.signer.SendAndWait(ctx, src, srcTokenAddr, big.NewInt(0), data, 100_000, 2*time.Minute)
+	if err != nil {
+		return "", fmt.Errorf("refund execTx: %w", err)
+	}
+	return tx.Hash().Hex(), nil
+}
+
 // ensureAllowance checks the TEE Safe's current allowance for `spender`
 // on `token` and, if below `amount`, submits an `approve` Safe execTx
 // for max-uint to amortise future approvals. Returns submitted=true iff

@@ -78,8 +78,10 @@ func main() {
 	// clients can encrypt and submit; intents land in pending and stay
 	// there until the operator populates TEE_SAFE_* and restarts.
 	var processor *privacy.Processor
+	var bridger *privacy.Bridger
 	if len(cfg.Chains) > 0 {
-		bridger, err := privacy.NewBridger(cfg)
+		var err error
+		bridger, err = privacy.NewBridger(cfg)
 		if err != nil {
 			log.WithError(err).Fatal("Failed to init Bridger")
 		}
@@ -109,7 +111,7 @@ func main() {
 		c.Next()
 	})
 
-	api := privacy.NewAPI(cfg, store)
+	api := privacy.NewAPI(cfg, store, bridger)
 	api.RegisterRoutes(router)
 
 	// Announce ourselves to the relayer twice (once per bridge type) so

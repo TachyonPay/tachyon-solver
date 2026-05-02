@@ -143,6 +143,8 @@ func (st *Store) SetTxHash(sessionID string, field string, txHash string) error 
 		intent.BridgeTxHash = txHash
 	case "delivered":
 		intent.DeliveredTxHash = txHash
+	case "refund":
+		intent.RefundTxHash = txHash
 	default:
 		return fmt.Errorf("unknown tx-hash field %q", field)
 	}

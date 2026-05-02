@@ -204,17 +204,32 @@ func LzSend(
 		return "", fmt.Errorf("read destination pre-balance: %w", err)
 	}
 
-	// Approve the OFT to pull the underlying ERC20 if required.
+	// Approve the OFT to pull the underlying ERC20 if required. When an
+	// approve actually got submitted (hash != "") we MUST wait for the
+	// Safe's on-chain nonce to advance before signing the next tx — the
+	// per-chain mutex in SafeSigner serializes signing, but it doesn't
+	// guarantee the RPC node we hit on the next signature-time
+	// Safe.nonce() read has already replicated the post-approve nonce.
+	// Skipping this is the canonical cause of GS026 ("invalid signature")
+	// reverts mid-bridge.
 	if tokenForApproval != (common.Address{}) {
-		if hash, err := ensureAllowance(ctx, s, srcChainID, tokenForApproval, oft, amount); err != nil {
+		preNonce, _ := safeNonce(ctx, s, srcChainID)
+		hash, err := ensureAllowance(ctx, s, srcChainID, tokenForApproval, oft, amount)
+		if err != nil {
 			return "", fmt.Errorf("approve: %w", err)
-		} else if hash != "" {
+		}
+		if hash != "" {
 			log.WithFields(log.Fields{
 				"chain":   srcChainID,
 				"token":   tokenForApproval.Hex(),
 				"spender": oft.Hex(),
 				"txHash":  hash,
 			}).Info("Approval submitted before LZ send")
+			if preNonce != nil {
+				if err := waitSafeNonceAdvance(ctx, s, srcChainID, preNonce, 30*time.Second); err != nil {
+					return "", fmt.Errorf("wait safe nonce after approve: %w", err)
+				}
+			}
 		}
 	}
 
@@ -256,6 +271,45 @@ func LzSend(
 	}).Info("Bridge complete")
 
 	return tx.Hash().Hex(), nil
+}
+
+// safeNonce reads `Safe.nonce()` on chainID via eth_call.
+// Selector: 0xaffed0e0 (nonce()) — present on every Safe v1.3.x deploy.
+// Returns nil for an EOA-mode signer (where there's no Safe to query);
+// callers fall back to skipping the nonce-advance wait in that case.
+func safeNonce(ctx context.Context, s Signer, chainID string) (*big.Int, error) {
+	holder := s.AddressOnChain(chainID)
+	out, err := s.CallReadOnly(ctx, chainID, holder, []byte{0xaf, 0xfe, 0xd0, 0xe0})
+	if err != nil {
+		return nil, err
+	}
+	if len(out) < 32 {
+		return nil, fmt.Errorf("nonce() returned %d bytes", len(out))
+	}
+	return new(big.Int).SetBytes(out[:32]), nil
+}
+
+// waitSafeNonceAdvance polls `Safe.nonce()` until it strictly exceeds
+// `pre`, or the deadline elapses. Used between back-to-back Safe execTx
+// calls (approve + send) to absorb RPC replication lag — without this
+// the second sign reads the pre-approve nonce off a lagging node and
+// the resulting tx fails with GS026 (invalid owner signature).
+func waitSafeNonceAdvance(ctx context.Context, s Signer, chainID string, pre *big.Int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		cur, err := safeNonce(ctx, s, chainID)
+		if err == nil && cur != nil && cur.Cmp(pre) > 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("Safe.nonce() did not advance past %s within %s", pre.String(), timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 }
 
 // stargateUSDCBridge bridges USDC ↔ USDC.e between Base and Horizen using the

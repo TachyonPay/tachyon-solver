@@ -1,6 +1,7 @@
 package privacy
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -11,12 +12,13 @@ import (
 // public (no admin auth) — sessionID is the bearer of authority for
 // status reads, and the encrypted POST body is its own integrity check.
 type API struct {
-	cfg   *Config
-	store *Store
+	cfg     *Config
+	store   *Store
+	bridger *Bridger // nil in degraded mode (no chains configured)
 }
 
-func NewAPI(cfg *Config, store *Store) *API {
-	return &API{cfg: cfg, store: store}
+func NewAPI(cfg *Config, store *Store, bridger *Bridger) *API {
+	return &API{cfg: cfg, store: store, bridger: bridger}
 }
 
 // RegisterRoutes mounts the privacy router endpoints on r.
@@ -25,6 +27,7 @@ func (a *API) RegisterRoutes(r *gin.Engine) {
 	r.GET("/pubkey", a.Pubkey)
 	r.POST("/bridge", a.Submit)
 	r.GET("/bridge/:id", a.Status)
+	r.POST("/refund/:id", a.Refund)
 }
 
 // Health returns 200 + a small JSON status. Used by container orchestrators
@@ -125,6 +128,81 @@ func (a *API) Status(c *gin.Context) {
 		SweepTxHash:     intent.SweepTxHash,
 		BridgeTxHash:    intent.BridgeTxHash,
 		DeliveredTxHash: intent.DeliveredTxHash,
+		RefundTxHash:    intent.RefundTxHash,
+		Refundable:      intent.Status == StatusSwept || intent.Status == StatusFailed,
 		Error:           intent.Error,
+	})
+}
+
+// Refund returns the deposited funds from the TEE Safe back to the
+// original user EOA when an intent gets stuck (status=swept) or
+// reverts mid-bridge (status=failed). sessionID is the bearer of
+// authority — the refund always targets intent.UserAddress (decrypted
+// from the original encrypted payload), so a bad-actor caller with
+// a leaked sessionID can only do the legitimate user a favor.
+func (a *API) Refund(c *gin.Context) {
+	sid := c.Param("id")
+	if sid == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "missing sessionID"})
+		return
+	}
+	if a.bridger == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "error": "privacy router in degraded mode (no chains configured)"})
+		return
+	}
+	intent, err := a.store.Get(sid)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+	if intent == nil {
+		c.JSON(http.StatusNotFound, gin.H{"success": false, "error": "not found"})
+		return
+	}
+	switch intent.Status {
+	case StatusSwept, StatusFailed:
+		// allowed
+	case StatusRefunded:
+		c.JSON(http.StatusOK, gin.H{
+			"success":      true,
+			"sessionId":    sid,
+			"refundTxHash": intent.RefundTxHash,
+			"message":      "already refunded",
+		})
+		return
+	default:
+		c.JSON(http.StatusConflict, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("intent in status %q is not refundable (need swept or failed)", intent.Status),
+		})
+		return
+	}
+
+	prev := intent.Status
+	txHash, err := a.bridger.Refund(c.Request.Context(), intent)
+	if err != nil {
+		log.WithError(err).WithField("sessionID", sid).Error("Refund failed")
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "error": err.Error()})
+		return
+	}
+	if err := a.store.SetTxHash(sid, "refund", txHash); err != nil {
+		log.WithError(err).WithField("sessionID", sid).Warn("SetTxHash refund persisted failed")
+	}
+	if err := a.store.ChangeStatus(sid, prev, StatusRefunded); err != nil {
+		log.WithError(err).WithField("sessionID", sid).Warn("ChangeStatus to refunded failed")
+	}
+	log.WithFields(log.Fields{
+		"sessionID": sid,
+		"txHash":    txHash,
+		"recipient": intent.UserAddress,
+		"chain":     intent.SourceChainID,
+	}).Info("Privacy bridge: refund delivered")
+	c.JSON(http.StatusOK, gin.H{
+		"success":      true,
+		"sessionId":    sid,
+		"refundTxHash": txHash,
+		"recipient":    intent.UserAddress,
+		"sourceChain":  intent.SourceChainID,
+		"amount":       intent.Amount.String(),
 	})
 }
