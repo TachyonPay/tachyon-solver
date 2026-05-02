@@ -42,8 +42,11 @@ type Processor struct {
 	transferTopic common.Hash
 
 	// Per-chain "last block scanned" cursor. Forward-only, updated as
-	// events are processed.
+	// events are processed. Each chain has its own watcher goroutine, but
+	// Go's map type is not safe for concurrent access even on disjoint
+	// keys, so cursorsMu guards every read/write.
 	lastScanned map[string]uint64
+	cursorsMu   sync.Mutex
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -128,7 +131,9 @@ func (p *Processor) watchDeposits(ctx context.Context, chainID string) {
 			continue
 		}
 
+		p.cursorsMu.Lock()
 		from := p.lastScanned[chainID]
+		p.cursorsMu.Unlock()
 		if from == 0 {
 			if latest > 10 {
 				from = latest - 10
@@ -169,7 +174,9 @@ func (p *Processor) watchDeposits(ctx context.Context, chainID string) {
 			for _, lg := range logs {
 				p.tryMatchDeposit(chainID, lg)
 			}
+			p.cursorsMu.Lock()
 			p.lastScanned[chainID] = chunkTo + 1
+			p.cursorsMu.Unlock()
 			cursor = chunkTo + 1
 		}
 	}
