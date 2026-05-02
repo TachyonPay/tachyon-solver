@@ -58,11 +58,11 @@ func DecryptAndValidate(priv *ecies.PrivateKey, encryptedHex string) (*BridgeInt
 		SessionID:       p.SessionID,
 		UserAddress:     p.UserAddress,
 		SourceChainID:   p.SourceChainID,
-		SourceToken:     p.SourceToken,
+		SourceToken:     NormalizeToken(string(p.SourceToken)),
 		InboundSafe:     p.InboundSafe,
 		Amount:          amt,
 		DestChainID:     p.DestChainID,
-		DestToken:       p.DestToken,
+		DestToken:       NormalizeToken(string(p.DestToken)),
 		DestStealthSafe: p.DestStealthSafe,
 		Status:          StatusPending,
 		Created:         now,
@@ -87,9 +87,11 @@ func validatePayload(p *BridgeIntentPayload) error {
 	if !common.IsHexAddress(p.DestStealthSafe) {
 		return fmt.Errorf("destStealthSafe %q invalid", p.DestStealthSafe)
 	}
-	if !IsSupportedRoute(p.SourceChainID, p.DestChainID, p.SourceToken, p.DestToken) {
+	srcTok := NormalizeToken(string(p.SourceToken))
+	dstTok := NormalizeToken(string(p.DestToken))
+	if !IsSupportedRoute(p.SourceChainID, p.DestChainID, srcTok, dstTok) {
 		return fmt.Errorf("route %s:%s → %s:%s not supported",
-			p.SourceChainID, p.SourceToken, p.DestChainID, p.DestToken)
+			p.SourceChainID, srcTok, p.DestChainID, dstTok)
 	}
 	if p.UnixTimestamp == 0 {
 		return fmt.Errorf("unixTimestamp required")

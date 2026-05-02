@@ -9,7 +9,11 @@
 // the gas.
 package privacy
 
-import "github.com/ethereum/go-ethereum/common"
+import (
+	"strings"
+
+	"github.com/ethereum/go-ethereum/common"
+)
 
 // Supported chain IDs (string form so they JSON-serialize as numbers
 // without quotes via the Token map keying).
@@ -277,6 +281,29 @@ func IsLifiRoute(src, dst string, srcTok, dstTok Token) bool {
 // token we add later). Used by the bridge code to decide whether to
 // approve an ERC20 before calling LI.FI's transactionRequest target.
 func IsNativeToken(t Token) bool { return t == TokenETH }
+
+// NormalizeToken maps any case-variation of a known token symbol to
+// the canonical Token constant. The catalog publishes uppercase
+// (USDC.E), the const is mixed-case (USDC.e), and clients will send
+// whichever they copied — without normalization the strict equality
+// check in IsStargateRoute / IsLifiRoute rejects everything but the
+// const's exact spelling. Unknown tokens pass through unchanged so
+// the route check rejects them on missing token address.
+func NormalizeToken(s string) Token {
+	switch strings.ToUpper(s) {
+	case "USDT0":
+		return TokenUSDT0
+	case "USDC":
+		return TokenUSDC
+	case "USDC.E":
+		return TokenUSDCe
+	case "ETH":
+		return TokenETH
+	case "ZEN":
+		return TokenZEN
+	}
+	return Token(s)
+}
 
 // TokenDecimals returns the canonical decimals for token.
 func TokenDecimals(t Token) uint8 {
