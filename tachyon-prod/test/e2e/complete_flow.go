@@ -77,7 +77,7 @@ func loadConfig() (*TestConfig, error) {
 		BridgeBaseAddr:    os.Getenv("CHAIN_2_BRIDGE"),
 		PrivateKey:        os.Getenv("PRIVATE_KEY"),
 		RelayerURL:        getEnvOrDefault("RELAYER_URL", "http://65.0.45.215:3000"),
-		AuctionDuration:   100,
+		AuctionDuration:   parseInt64OrDefault("TEST_AUCTION_DURATION", 100),
 		AmountA:           getEnvOrDefault("TEST_AMOUNT_A", "100"),
 		AmountB:           getEnvOrDefault("TEST_AMOUNT_B", "95"),
 		Reward:            getEnvOrDefault("TEST_REWARD", "5"),
@@ -94,6 +94,18 @@ func getEnvOrDefault(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+func parseInt64OrDefault(key string, def int64) int64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 func main() {

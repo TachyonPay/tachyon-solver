@@ -715,9 +715,17 @@ func (c *Client) RelaySafeTransaction(ctx context.Context, safeAddr common.Addre
 	if value != nil && value.Sign() > 0 {
 		auth.Value = new(big.Int).Set(value)
 	}
-	// Bridge inner calls (Stargate / OFT send) consume ~400-500k gas; swaps
-	// and approves are well under. 600k is a safe ceiling.
-	auth.GasLimit = uint64(600000)
+	// Bridge inner calls vary widely:
+	//   - Stargate / OFT send:  ~400-500k
+	//   - Approves / swaps:     ~50-200k
+	//   - LI.FI Diamond simple: ~500-700k (single Across deposit)
+	//   - LI.FI Diamond multi-hop: ~1.4-2.5M (Across + intermediate
+	//     DEX swaps for cross-token routes through ZRO/WETH/USDC)
+	// 3M is a generous ceiling that leaves headroom for the Safe
+	// wrapper plus a worst-case multi-hop inner call. Unused gas is
+	// refunded so this only caps worst-case waste; it does not
+	// pre-charge.
+	auth.GasLimit = uint64(3_000_000)
 
 	tx, err := safe.Transact(auth, "execTransaction",
 		to, value, data, operation,

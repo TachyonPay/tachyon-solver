@@ -27,9 +27,21 @@ type Relayer struct {
 	store            *storage.Store
 	recipientStore   map[string]*types.RecipientInfo   // In-memory cache
 	intentDetailsStore map[string]*types.IntentDetails // In-memory cache
-	registeredSolvers map[string]*types.SolverInfo     // In-memory cache
+	// registeredSolvers is keyed by "<type>:<address>" so the same address
+	// can register multiple bridge kinds (e.g. the privacy router is both
+	// "lifiXtach" and "stargateXtach" pointing at the same Safe).
+	registeredSolvers map[string]*types.SolverInfo
 	mu               sync.RWMutex
 	txMutexes        map[string]*sync.Mutex
+}
+
+// solverKey forms the in-memory map key for a solver registration.
+// Empty type maps to "tachyon" for backwards compatibility.
+func solverKey(solverType, address string) string {
+	if solverType == "" {
+		solverType = "tachyon"
+	}
+	return solverType + ":" + address
 }
 
 func NewRelayer(cfg *config.Config) (*Relayer, error) {
@@ -94,8 +106,8 @@ func (r *Relayer) loadPersistedData() error {
 		return fmt.Errorf("failed to load solvers: %w", err)
 	}
 	r.mu.Lock()
-	for addr, info := range solvers {
-		r.registeredSolvers[addr] = info
+	for compositeKey, info := range solvers {
+		r.registeredSolvers[compositeKey] = info
 	}
 	r.mu.Unlock()
 
@@ -806,23 +818,31 @@ func (r *Relayer) RegisterSolver(req *types.RegisterSolverRequest) (*types.Regis
 		}
 	}
 
+	solverType := req.Type
+	if solverType == "" {
+		solverType = "tachyon"
+	}
+
 	now := time.Now()
 	solverInfo := &types.SolverInfo{
+		Type:         solverType,
 		Address:      req.SolverAddress,
 		Routes:       req.Routes,
+		Tokens:       req.Tokens,
 		Balances:     balances,
 		RegisteredAt: now,
 		LastSeen:     now,
 	}
 
-	r.registeredSolvers[req.SolverAddress] = solverInfo
+	r.registeredSolvers[solverKey(solverType, req.SolverAddress)] = solverInfo
 
 	// Persist to database
-	if err := r.store.SaveSolverInfo(req.SolverAddress, solverInfo); err != nil {
+	if err := r.store.SaveSolverInfo(solverType, req.SolverAddress, solverInfo); err != nil {
 		log.WithError(err).Warn("Failed to persist solver info to database")
 	}
 
 	log.WithFields(log.Fields{
+		"type":        solverType,
 		"solver":      req.SolverAddress,
 		"routesCount": len(req.Routes),
 		"balances":    len(balances),
@@ -876,11 +896,15 @@ func (r *Relayer) GetRoutes(filter *types.GetRoutesRequest) *types.GetRoutesResp
 	solversWithRoutes := []types.SolverInfo{}
 
 	for _, solverInfo := range r.registeredSolvers {
+		if !solverTypeMatches(filter.Type, solverInfo.Type) {
+			continue
+		}
+
 		matchedRoutes := []types.Route{}
 
 		for _, route := range solverInfo.Routes {
 			if r.matchesFilter(route, filter) {
-				routeKey := fmt.Sprintf("%s-%s-%s-%s", route.SourceChain, route.DestChain, route.TokenA, route.TokenB)
+				routeKey := fmt.Sprintf("%s-%s-%s-%s-%s", solverInfo.Type, route.SourceChain, route.DestChain, route.TokenA, route.TokenB)
 				uniqueRoutes[routeKey] = route
 				matchedRoutes = append(matchedRoutes, route)
 			}
@@ -919,6 +943,19 @@ func (r *Relayer) matchesFilter(route types.Route, filter *types.GetRoutesReques
 		return false
 	}
 	return true
+}
+
+// solverTypeMatches reports whether a registered solver should be included
+// for a given type filter. Empty filter matches all types; empty solver
+// type is treated as "tachyon" so legacy registrations stay queryable.
+func solverTypeMatches(filterType, solverType string) bool {
+	if filterType == "" {
+		return true
+	}
+	if solverType == "" {
+		solverType = "tachyon"
+	}
+	return solverType == filterType
 }
 
 func (r *Relayer) GetNetworks() []string {

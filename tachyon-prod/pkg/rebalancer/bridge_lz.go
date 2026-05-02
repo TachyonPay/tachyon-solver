@@ -136,7 +136,7 @@ func lzQuoteSend(ctx context.Context, s Signer, chainID string, oft common.Addre
 	return MessagingFee{NativeFee: feeStruct.NativeFee, LzTokenFee: feeStruct.LzTokenFee}, nil
 }
 
-// lzSend signs and submits an OFT/Stargate send AND waits for the funds to
+// LzSend signs and submits an OFT/Stargate send AND waits for the funds to
 // arrive on the destination chain. Returns the source-chain tx hash.
 //
 //   - `srcChainID` / `oft`: where we sign and call send().
@@ -152,7 +152,7 @@ func lzQuoteSend(ctx context.Context, s Signer, chainID string, oft common.Addre
 //
 // Cross-chain delivery typically takes 1–3 min; we wait up to 10 min before
 // failing.
-func lzSend(
+func LzSend(
 	ctx context.Context,
 	s Signer,
 	srcChainID string,
@@ -280,7 +280,7 @@ func stargateUSDCBridge(ctx context.Context, s Signer, srcChainID, dstChainID st
 		return "", fmt.Errorf("unsupported Stargate USDC route %s → %s", srcChainID, dstChainID)
 	}
 
-	return lzSend(ctx, s, srcChainID, oft, tokenIn, dstChainID, dstToken, dstEid, s.AddressOnChain(dstChainID), amount, slippagePct, gasBufferWei)
+	return LzSend(ctx, s, srcChainID, oft, tokenIn, dstChainID, dstToken, dstEid, s.AddressOnChain(dstChainID), amount, slippagePct, gasBufferWei)
 }
 
 // oftZENBridge bridges ZEN between Base and Horizen using the LayerZero OFT.
@@ -304,5 +304,5 @@ func oftZENBridge(ctx context.Context, s Signer, srcChainID, dstChainID string, 
 		return "", fmt.Errorf("unsupported ZEN OFT route %s → %s", srcChainID, dstChainID)
 	}
 
-	return lzSend(ctx, s, srcChainID, oft, tokenIn, dstChainID, dstToken, dstEid, s.AddressOnChain(dstChainID), amount, slippagePct, gasBufferWei)
+	return LzSend(ctx, s, srcChainID, oft, tokenIn, dstChainID, dstToken, dstEid, s.AddressOnChain(dstChainID), amount, slippagePct, gasBufferWei)
 }

@@ -171,10 +171,34 @@ type SolverBalance struct {
 	Balance string `json:"balance"`
 }
 
-// RegisterSolverRequest is the request body for solver registration
+// RegisterSolverRequest is the request body for solver registration.
+// Type lets a single relayer index multiple service kinds:
+//
+//	"tachyon"        — the original solver (default if Type is empty for
+//	                   backwards compatibility)
+//	"lifiXtach"      — privacy router routing legs through LI.FI
+//	"stargateXtach"  — privacy router routing legs through Stargate
+//
+// Frontends discover the available routes per bridge by calling
+// GET /solvers?type=<value>. Tokens is an optional sidecar dictionary
+// of (chain, symbol) → {address, decimals} entries used by the routes
+// — surfaced verbatim on /solvers so the frontend doesn't need its own
+// token registry.
 type RegisterSolverRequest struct {
-	SolverAddress string  `json:"solverAddress" binding:"required"`
-	Routes        []Route `json:"routes" binding:"required"`
+	Type          string      `json:"type,omitempty"`
+	SolverAddress string      `json:"solverAddress" binding:"required"`
+	Routes        []Route     `json:"routes" binding:"required"`
+	Tokens        []TokenInfo `json:"tokens,omitempty"`
+}
+
+// TokenInfo describes a single token on a single chain. Address is
+// the on-chain ERC-20 contract for stables / OFTs and the LI.FI
+// "native" sentinel (0xEee…EEeE) for native gas tokens like ETH.
+type TokenInfo struct {
+	ChainID  string `json:"chainId"`
+	Symbol   string `json:"symbol"`
+	Address  string `json:"address"`
+	Decimals uint8  `json:"decimals"`
 }
 
 // RegisterSolverResponse is the response from solver registration
@@ -186,18 +210,26 @@ type RegisterSolverResponse struct {
 	Error        string          `json:"error,omitempty"`
 }
 
-// GetRoutesRequest is the request body for querying routes
+// GetRoutesRequest is the request body for querying routes. Type narrows
+// results to a specific bridge kind ("tachyon", "lifiXtach",
+// "stargateXtach"); empty returns all kinds.
 type GetRoutesRequest struct {
+	Type        string `json:"type,omitempty"`
 	SourceChain string `json:"sourceChain,omitempty"`
 	DestChain   string `json:"destChain,omitempty"`
 	TokenA      string `json:"tokenA,omitempty"`
 	TokenB      string `json:"tokenB,omitempty"`
 }
 
-// SolverInfo represents information about a registered solver
+// SolverInfo represents information about a registered solver. Type is
+// the bridge kind ("tachyon", "lifiXtach", "stargateXtach"); empty maps
+// to "tachyon" for backwards compatibility with old registrations
+// persisted before the field existed.
 type SolverInfo struct {
+	Type         string          `json:"type,omitempty"`
 	Address      string          `json:"address"`
 	Routes       []Route         `json:"routes"`
+	Tokens       []TokenInfo     `json:"tokens,omitempty"`
 	Balances     []SolverBalance `json:"balances"`
 	RegisteredAt time.Time       `json:"registeredAt"`
 	LastSeen     time.Time       `json:"lastSeen"`

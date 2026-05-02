@@ -178,16 +178,29 @@ func (s *Store) GetIntentDetails(sourceChainID string, intentID string) (*types.
 }
 
 // Solver Registration Storage
+//
+// Keys are formed as "<solverType>:<address>" so a single address can
+// register multiple service kinds (the privacy router registers as both
+// "lifiXtach" and "stargateXtach" with the same Safe). Empty type maps to
+// "tachyon" for backwards compatibility with rows persisted before the
+// Type field existed.
 
-// SaveSolverInfo saves solver registration info
-func (s *Store) SaveSolverInfo(solverAddress string, info *types.SolverInfo) error {
-	key := PrefixSolver + solverAddress
+func solverStoreKey(solverType, address string) string {
+	if solverType == "" {
+		solverType = "tachyon"
+	}
+	return solverType + ":" + address
+}
+
+// SaveSolverInfo saves solver registration info keyed by (type, address).
+func (s *Store) SaveSolverInfo(solverType, solverAddress string, info *types.SolverInfo) error {
+	key := PrefixSolver + solverStoreKey(solverType, solverAddress)
 	return s.PutJSON(key, info)
 }
 
-// GetSolverInfo retrieves solver info
-func (s *Store) GetSolverInfo(solverAddress string) (*types.SolverInfo, error) {
-	key := PrefixSolver + solverAddress
+// GetSolverInfo retrieves solver info for a (type, address) pair.
+func (s *Store) GetSolverInfo(solverType, solverAddress string) (*types.SolverInfo, error) {
+	key := PrefixSolver + solverStoreKey(solverType, solverAddress)
 	var info types.SolverInfo
 	if err := s.GetJSON(key, &info); err != nil {
 		if err == pebble.ErrNotFound {
@@ -198,7 +211,9 @@ func (s *Store) GetSolverInfo(solverAddress string) (*types.SolverInfo, error) {
 	return &info, nil
 }
 
-// GetAllSolvers returns all registered solvers
+// GetAllSolvers returns all registered solvers keyed by "<type>:<address>".
+// Old rows persisted with address-only keys are surfaced under
+// "tachyon:<address>" so callers see a uniform key space.
 func (s *Store) GetAllSolvers() (map[string]*types.SolverInfo, error) {
 	result := make(map[string]*types.SolverInfo)
 	data, err := s.GetAllByPrefix(PrefixSolver)
@@ -211,9 +226,12 @@ func (s *Store) GetAllSolvers() (map[string]*types.SolverInfo, error) {
 		if err := unmarshalJSON(value, &info); err != nil {
 			continue
 		}
-		// Strip prefix from key
-		solverAddr := key[len(PrefixSolver):]
-		result[solverAddr] = &info
+		raw := key[len(PrefixSolver):]
+		composite := raw
+		if !strings.Contains(raw, ":") {
+			composite = solverStoreKey("tachyon", raw)
+		}
+		result[composite] = &info
 	}
 	return result, nil
 }

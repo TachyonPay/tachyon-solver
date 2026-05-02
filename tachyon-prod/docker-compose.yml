@@ -82,6 +82,42 @@ services:
         max-size: "50m"
         max-file: "3"
 
+  privacy-router:
+    build:
+      context: .
+      dockerfile: Dockerfile.privacy-router
+    image: tachyon/privacy-router:local
+    container_name: tachyon-privacy-router
+    restart: unless-stopped
+    stop_grace_period: 30s
+    env_file:
+      - .env
+    environment:
+      DB_PATH: /data
+      # Reach the relayer via service name on the compose network rather
+      # than the .env localhost default.
+      RELAYER_URL: http://relayer:3000
+    expose:
+      - "3003"
+    volumes:
+      - privacy-router-data:/data
+    networks:
+      - tachyon-network
+    depends_on:
+      relayer:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3003/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
   caddy:
     image: caddy:2-alpine
     container_name: tachyon-caddy
@@ -102,6 +138,8 @@ services:
         condition: service_healthy
       solver:
         condition: service_healthy
+      privacy-router:
+        condition: service_healthy
     logging:
       driver: "json-file"
       options:
@@ -112,6 +150,8 @@ volumes:
   relayer-data:
     driver: local
   solver-data:
+    driver: local
+  privacy-router-data:
     driver: local
   caddy-data:
     driver: local

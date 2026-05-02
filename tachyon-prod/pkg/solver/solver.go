@@ -22,6 +22,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/zk-tachyon/tachyon-prod/pkg/blockchain"
 	"github.com/zk-tachyon/tachyon-prod/pkg/config"
+	"github.com/zk-tachyon/tachyon-prod/pkg/rebalancer"
 	"github.com/zk-tachyon/tachyon-prod/pkg/storage"
 	"github.com/zk-tachyon/tachyon-prod/pkg/types"
 )
@@ -222,33 +223,94 @@ func (s *Solver) RegisterWithRelayer() error {
 		break
 	}
 
-	// Generate all possible routes (every chain can be source or destination)
-	routes := []types.Route{}
+	// Build the concrete catalog. For each (src, dst) chain pair we walk
+	// the tokens the rebalancer can settle (USDC and ZEN today) and emit
+	// one Route per pair where both sides have an on-chain address. The
+	// FE consumes (chainID, symbol) tuples so we render Horizen's "USDC"
+	// as "USDC.E" — the underlying contract is the bridged variant and
+	// keeping the same symbol on both ends would be misleading.
 	chainIDs := make([]string, 0, len(s.cfg.Chains))
 	for chainID := range s.cfg.Chains {
 		chainIDs = append(chainIDs, chainID)
 	}
 
-	// Create bidirectional routes between all chain pairs
-	for i, sourceChainID := range chainIDs {
-		sourceCfg := s.cfg.Chains[sourceChainID]
-		for j, destChainID := range chainIDs {
-			if i != j { // Don't create route to same chain
-				destCfg := s.cfg.Chains[destChainID]
-				route := types.Route{
-					SourceChain: sourceCfg.Name,
-					DestChain:   destCfg.Name,
-					TokenA:      "", // Support all tokens
-					TokenB:      "",
+	type tokInfo struct {
+		symbol   string
+		address  string
+		decimals uint8
+	}
+	resolveToken := func(chainID string, sym rebalancer.TokenSym) (tokInfo, bool) {
+		addr := rebalancer.TokenAddress(chainID, sym)
+		if addr == (common.Address{}) {
+			return tokInfo{}, false
+		}
+		display := strings.ToUpper(string(sym))
+		if chainID == rebalancer.ChainIDHorizen && sym == rebalancer.TokenUSDC {
+			display = "USDC.E"
+		}
+		return tokInfo{
+			symbol:   display,
+			address:  addr.Hex(),
+			decimals: rebalancer.TokenDecimals(sym),
+		}, true
+	}
+
+	routes := []types.Route{}
+	tokens := []types.TokenInfo{}
+	tokenSeen := map[string]bool{}
+	addToken := func(chainID string, ti tokInfo) {
+		k := chainID + ":" + ti.symbol
+		if tokenSeen[k] {
+			return
+		}
+		tokenSeen[k] = true
+		tokens = append(tokens, types.TokenInfo{
+			ChainID:  chainID,
+			Symbol:   ti.symbol,
+			Address:  ti.address,
+			Decimals: ti.decimals,
+		})
+	}
+
+	supportedSyms := []rebalancer.TokenSym{rebalancer.TokenUSDC, rebalancer.TokenZEN}
+	for _, srcChain := range chainIDs {
+		for _, dstChain := range chainIDs {
+			if srcChain == dstChain {
+				continue
+			}
+			for _, sym := range supportedSyms {
+				srcTok, ok := resolveToken(srcChain, sym)
+				if !ok {
+					continue
 				}
-				routes = append(routes, route)
+				dstTok, ok := resolveToken(dstChain, sym)
+				if !ok {
+					continue
+				}
+				routes = append(routes, types.Route{
+					SourceChain: srcChain,
+					DestChain:   dstChain,
+					TokenA:      srcTok.symbol,
+					TokenB:      dstTok.symbol,
+				})
+				addToken(srcChain, srcTok)
+				addToken(dstChain, dstTok)
 			}
 		}
 	}
 
+	sort.Slice(tokens, func(i, j int) bool {
+		if tokens[i].ChainID != tokens[j].ChainID {
+			return tokens[i].ChainID < tokens[j].ChainID
+		}
+		return tokens[i].Symbol < tokens[j].Symbol
+	})
+
 	req := types.RegisterSolverRequest{
+		Type:          "tachyon",
 		SolverAddress: solverAddr,
 		Routes:        routes,
+		Tokens:        tokens,
 	}
 
 	reqBody, err := json.Marshal(req)

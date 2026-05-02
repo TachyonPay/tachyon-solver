@@ -1,0 +1,35 @@
+# Build stage
+FROM golang:1.23-alpine AS builder
+
+RUN apk add --no-cache gcc musl-dev git
+
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o privacy-router ./cmd/privacy-router
+
+# Runtime stage
+FROM alpine:3.19
+
+RUN apk add --no-cache ca-certificates tzdata
+RUN adduser -D -g '' tachyon
+WORKDIR /app
+
+COPY --from=builder /app/privacy-router .
+COPY --from=builder /app/contracts ./contracts
+
+RUN mkdir -p /data && chown -R tachyon:tachyon /data
+USER tachyon
+
+# DB_PATH is the parent directory; the binary appends "/privacy" itself.
+ENV DB_PATH=/data
+ENV PRIVACY_PORT=3003
+ENV GIN_MODE=release
+
+EXPOSE 3003
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:3003/health || exit 1
+
+ENTRYPOINT ["./privacy-router"]

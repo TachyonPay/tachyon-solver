@@ -13,3 +13,7 @@ relayer.tachyon.pe {
 solver.tachyon.pe {
 	reverse_proxy solver:3001
 }
+
+privacy.tachyon.pe {
+	reverse_proxy privacy-router:3003
+}

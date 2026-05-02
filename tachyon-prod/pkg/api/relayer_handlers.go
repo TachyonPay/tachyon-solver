@@ -32,6 +32,7 @@ func (api *RelayerAPI) RegisterRoutes(r *gin.Engine) {
 	r.POST("/verify", api.VerifyIntent)
 	r.POST("/get-routes", api.GetRoutes)
 	r.GET("/get-routes", api.GetRoutesQuery)
+	r.GET("/solvers", api.GetSolvers)
 
 	// Endpoints that require solver/user interaction (not admin-protected)
 	r.POST("/store-recipients", api.StoreRecipients)
@@ -277,6 +278,7 @@ func (api *RelayerAPI) GetRoutesQuery(c *gin.Context) {
 	}
 
 	filter := types.GetRoutesRequest{
+		Type:        c.Query("type"),
 		SourceChain: sourceChain,
 		DestChain:   c.Query("destChain"),
 		TokenA:      originAsset,
@@ -285,6 +287,22 @@ func (api *RelayerAPI) GetRoutesQuery(c *gin.Context) {
 
 	response := api.relayer.GetRoutes(&filter)
 	c.JSON(http.StatusOK, response)
+}
+
+// GetSolvers returns the registered solver list, optionally filtered by
+// bridge type (?type=tachyon|lifiXtach|stargateXtach). Solvers are
+// surfaced with their full route lists so frontends can discover what a
+// given bridge supports without separately querying /get-routes.
+func (api *RelayerAPI) GetSolvers(c *gin.Context) {
+	filter := types.GetRoutesRequest{
+		Type: c.Query("type"),
+	}
+
+	response := api.relayer.GetRoutes(&filter)
+	c.JSON(http.StatusOK, gin.H{
+		"success": response.Success,
+		"solvers": response.Solvers,
+	})
 }
 
 // RegisterRecipient handles recipient registration and key generation
