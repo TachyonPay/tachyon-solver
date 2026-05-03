@@ -3,6 +3,7 @@ package privacy
 import (
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"path/filepath"
 	"strings"
 	"time"
@@ -172,6 +173,69 @@ func (st *Store) SetError(sessionID string, errMsg string) error {
 	}
 	_ = st.s.Delete(byStatusPrefix + string(prev) + ":" + sessionID)
 	return st.s.Put(byStatusPrefix+string(StatusFailed)+":"+sessionID, []byte{})
+}
+
+// FindActiveCollision returns an existing intent in {pending, swept}
+// that shares the (userAddress, sourceChainID, sourceToken, amount)
+// tuple a new submit would carry. Used to reject submit-time
+// collisions: a single shared TEE Safe per chain means the deposit
+// watcher matches by (chain, token, amount, from), so two pending
+// intents from the same user at the same amount would race for the
+// next deposit. Returns the youngest match, or nil if none.
+func (st *Store) FindActiveCollision(userAddr, srcChain string, srcTok Token, amount *big.Int) (*BridgeIntent, error) {
+	candidates := []*BridgeIntent{}
+	for _, status := range []Status{StatusPending, StatusSwept} {
+		batch, err := st.ListByStatus(status)
+		if err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, batch...)
+	}
+	var youngest *BridgeIntent
+	for _, c := range candidates {
+		if !strings.EqualFold(c.UserAddress, userAddr) {
+			continue
+		}
+		if c.SourceChainID != srcChain {
+			continue
+		}
+		if c.SourceToken != srcTok {
+			continue
+		}
+		if c.Amount == nil || amount == nil || c.Amount.Cmp(amount) != 0 {
+			continue
+		}
+		if youngest == nil || c.Created.After(youngest.Created) {
+			youngest = c
+		}
+	}
+	return youngest, nil
+}
+
+// ExpireStalePendings walks all pending intents, marks any with
+// `created < now - maxAge` as failed (with a synthetic "expired:
+// pending TTL" error), removes them from the by-status index, and
+// returns the count of expired entries. Callers should run this
+// periodically to clear abandoned submits so they can't collide with
+// future deposits at the same amount.
+func (st *Store) ExpireStalePendings(maxAge time.Duration) (int, error) {
+	pending, err := st.ListByStatus(StatusPending)
+	if err != nil {
+		return 0, err
+	}
+	cutoff := time.Now().Add(-maxAge)
+	expired := 0
+	for _, intent := range pending {
+		if !intent.Created.Before(cutoff) {
+			continue
+		}
+		if err := st.SetError(intent.SessionID, "expired: pending TTL exceeded"); err != nil {
+			log.WithError(err).WithField("sessionID", intent.SessionID).Warn("ExpireStalePendings: SetError failed")
+			continue
+		}
+		expired++
+	}
+	return expired, nil
 }
 
 // ListByStatus returns all intents currently in the given status, in

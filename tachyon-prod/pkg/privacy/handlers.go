@@ -3,10 +3,19 @@ package privacy
 import (
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
+
+// PendingTTL is the age beyond which a `pending` intent is treated as
+// abandoned. Drives both the periodic expiry sweeper and the on-submit
+// collision-eviction path: if a colliding intent at the same (user,
+// srcChain, srcToken, amount) is older than this, it gets auto-failed
+// to make room for the new submit; if younger, the new submit is
+// rejected with HTTP 409.
+const PendingTTL = 5 * time.Minute
 
 // API binds the HTTP handlers for the privacy router. Routes are kept
 // public (no admin auth) — sessionID is the bearer of authority for
@@ -82,6 +91,40 @@ func (a *API) Submit(c *gin.Context) {
 			Error:     "sessionId already submitted",
 		})
 		return
+	}
+
+	// Reject if the user has another in-flight intent at the SAME
+	// (sourceChain, sourceToken, amount). Single shared TEE Safe per
+	// chain means the deposit watcher matches by tuple — two pending
+	// intents at the same amount would race for the next deposit and
+	// only one would actually bridge. If the colliding intent is
+	// older than PendingTTL it's auto-expired and the new submit
+	// proceeds; otherwise the FE should wait or vary the amount.
+	if collision, _ := a.store.FindActiveCollision(intent.UserAddress, intent.SourceChainID, intent.SourceToken, intent.Amount); collision != nil {
+		age := time.Since(collision.Created)
+		if age < PendingTTL {
+			c.JSON(http.StatusConflict, SubmitResponse{
+				Success:   false,
+				SessionID: intent.SessionID,
+				Error: fmt.Sprintf("user has an in-flight intent (sessionId=%s, status=%s, age=%s) at the same (chain, token, amount); wait for it to settle or vary the amount",
+					collision.SessionID, collision.Status, age.Truncate(time.Second)),
+			})
+			return
+		}
+		// Collision exists but old enough to expire. Mark it failed so
+		// it stops competing for deposits, then accept the new submit.
+		if err := a.store.SetError(collision.SessionID, "expired: superseded by newer intent at same (chain, token, amount)"); err != nil {
+			log.WithError(err).WithField("sessionID", collision.SessionID).Warn("Failed to expire colliding intent on submit")
+		} else {
+			log.WithFields(log.Fields{
+				"expired":   collision.SessionID,
+				"new":       intent.SessionID,
+				"age":       age,
+				"userAddr":  collision.UserAddress,
+				"src":       collision.SourceChainID + ":" + string(collision.SourceToken),
+				"amount":    collision.Amount.String(),
+			}).Info("Auto-expired stale colliding intent on new submit")
+		}
 	}
 
 	if err := a.store.Save(intent); err != nil {

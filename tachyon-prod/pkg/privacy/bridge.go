@@ -183,12 +183,40 @@ func (b *Bridger) sendLifi(ctx context.Context, intent *BridgeIntent) (string, e
 		"toRecipient": dstStealth.Hex(),
 	}).Info("Privacy bridge: requesting LI.FI quote")
 
-	quote, err := b.lifi.Quote(ctx, src, intent.DestChainID,
-		srcTokenAddr.Hex(), dstTokenAddr.Hex(),
-		teeSafe.Hex(), dstStealth.Hex(),
-		intent.Amount, b.slippagePct)
-	if err != nil {
-		return "", fmt.Errorf("lifi quote: %w", err)
+	// LI.FI's quote endpoint can intermittently return 404 ("No
+	// available quotes") for small amounts when no Across/Relay
+	// relayer is online to take the order. The pool typically
+	// recovers within a minute. Retry transient quote failures with
+	// backoff before giving up — without this, ~1% of small bridges
+	// land in `failed` and need a manual /refund + resubmit.
+	const lifiQuoteRetries = 3
+	const lifiQuoteBackoff = 30 * time.Second
+	var quote *LiFiQuote
+	var quoteErr error
+	for attempt := 0; attempt < lifiQuoteRetries; attempt++ {
+		quote, quoteErr = b.lifi.Quote(ctx, src, intent.DestChainID,
+			srcTokenAddr.Hex(), dstTokenAddr.Hex(),
+			teeSafe.Hex(), dstStealth.Hex(),
+			intent.Amount, b.slippagePct)
+		if quoteErr == nil {
+			break
+		}
+		if !isTransientLifiErr(quoteErr) {
+			return "", fmt.Errorf("lifi quote: %w", quoteErr)
+		}
+		log.WithError(quoteErr).WithFields(log.Fields{
+			"sessionID": intent.SessionID,
+			"attempt":   attempt + 1,
+			"max":       lifiQuoteRetries,
+		}).Warn("LI.FI quote transient failure, retrying after backoff")
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(lifiQuoteBackoff):
+		}
+	}
+	if quoteErr != nil {
+		return "", fmt.Errorf("lifi quote: %w (after %d attempts)", quoteErr, lifiQuoteRetries)
 	}
 	log.WithFields(log.Fields{
 		"sessionID":   intent.SessionID,
@@ -247,6 +275,35 @@ func (b *Bridger) sendLifi(ctx context.Context, intent *BridgeIntent) (string, e
 	}).Info("Privacy bridge: source tx mined")
 
 	return tx.Hash().Hex(), nil
+}
+
+// isTransientLifiErr classifies a LI.FI client error as worth
+// retrying. The two patterns we see in production:
+//
+//   - 404 "No available quotes for the requested transfer" — Across/
+//     Relay relayer pool briefly empty for this (chain pair, amount).
+//     Recovers within a minute.
+//   - 5xx server errors / network timeouts — generic transient.
+//
+// Validation errors (400s on bad address, unsupported chain, etc.)
+// and 4xx other than 404 are NOT retried — they won't recover and
+// the user needs to refund + resubmit.
+func isTransientLifiErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "404"):
+		return true
+	case strings.Contains(msg, "500"), strings.Contains(msg, "502"), strings.Contains(msg, "503"), strings.Contains(msg, "504"):
+		return true
+	case strings.Contains(msg, "context deadline exceeded"):
+		return true
+	case strings.Contains(msg, "no such host"), strings.Contains(msg, "connection refused"), strings.Contains(msg, "i/o timeout"):
+		return true
+	}
+	return false
 }
 
 // Refund returns an `intent.Amount` of `intent.SourceToken` from the

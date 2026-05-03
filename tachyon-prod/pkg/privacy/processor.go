@@ -87,6 +87,36 @@ func (p *Processor) Start(ctx context.Context) {
 	}
 	p.wg.Add(1)
 	go p.dispatchLoop(ctx)
+	p.wg.Add(1)
+	go p.expirySweeper(ctx)
+}
+
+// expirySweeper periodically marks abandoned pending intents (those
+// older than PendingTTL with no deposit yet) as failed. Keeps the
+// deposit-matching bucket clean so future deposits at the same
+// (chain, token, amount, sender) can't accidentally land on a stale
+// pending intent the user has already given up on.
+func (p *Processor) expirySweeper(ctx context.Context) {
+	defer p.wg.Done()
+	tick := time.NewTicker(60 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-p.stopCh:
+			return
+		case <-tick.C:
+		}
+		n, err := p.store.ExpireStalePendings(PendingTTL)
+		if err != nil {
+			log.WithError(err).Warn("expirySweeper: ExpireStalePendings failed")
+			continue
+		}
+		if n > 0 {
+			log.WithField("count", n).Info("Expired stale pending intents")
+		}
+	}
 }
 
 // Stop signals shutdown and waits for goroutines to exit.
