@@ -493,7 +493,17 @@ func (r *Relayer) DeploySafe(ctx context.Context, req *types.DeploySafeRequest) 
 	r.txMutexes[req.ChainID].Lock()
 	defer r.txMutexes[req.ChainID].Unlock()
 
-	tx, predictedSafe, err := client.DeploySafe(ctx, stealthAddr, saltNonce)
+	// MegaETH inflates Safe-deploy gas usage ~4× (we observe ~2.1M on a
+	// fresh proxy + initializer where other chains use ~260k). The
+	// default 500k cap inside Client.DeploySafe is enough for the cheap
+	// chains but reverts MegaETH with "Create2 call failed" mid-deploy.
+	// Pass a generous explicit limit on chains we know need it; unused
+	// gas is refunded so this only matters as an upper bound.
+	deployOpts := blockchain.DeploySafeOpts{}
+	if req.ChainID == "4326" { // MegaETH
+		deployOpts.GasLimit = 2_500_000
+	}
+	tx, predictedSafe, err := client.DeploySafeWithOpts(ctx, stealthAddr, saltNonce, deployOpts)
 	if err != nil {
 		return nil, fmt.Errorf("safe deployment failed: %w", err)
 	}
