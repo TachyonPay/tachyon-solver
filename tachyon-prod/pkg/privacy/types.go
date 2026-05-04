@@ -96,22 +96,50 @@ type SubmitRequest struct {
 type SubmitResponse struct {
 	Success   bool   `json:"success"`
 	SessionID string `json:"sessionId,omitempty"`
-	Error     string `json:"error,omitempty"`
+	// DestStealthSafe is the predicted Safe address on the destination
+	// chain that will receive the bridged funds. In mode 1 (relayer-
+	// managed stealth) this is the address the relayer just generated;
+	// the FE should display it to the user as "your funds will land
+	// here". In mode 2 (FE-managed) it echoes back the address the
+	// caller put in the encrypted payload.
+	DestStealthSafe string `json:"destStealthSafe,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 // BridgeIntentPayload is the cleartext shape inside the encrypted blob.
-// All fields required; decrypt rejects on missing/zero values.
+//
+// The privacy router supports two stealth-Safe sourcing modes:
+//
+//  1. Relayer-managed (preferred): caller sets RegisterStealthSig to
+//     an EIP-712 signature of `RegisterStealth(userAddress)` and
+//     leaves DestStealthSafe empty. The privacy router calls the
+//     relayer's /recipient/register + /recipient/generate-stealth on
+//     the user's behalf, gets back a fresh stealth Safe owned by a
+//     TEE-derivable stealth EOA, and uses that as the bridge dest.
+//     User can later recover via the relayer's existing
+//     /recipient/derive-stealth-key + /recipient/deploy-safe flow
+//     with their wallet signature — no client-side keypair to
+//     persist.
+//
+//  2. FE-managed (legacy): caller generates the stealth keypair
+//     client-side, computes the CREATE2 Safe address, sets
+//     DestStealthSafe to that address, leaves RegisterStealthSig
+//     empty. FE bears the burden of persisting/deriving the stealth
+//     privkey to ever sweep the funds.
+//
+// Mode 1 is selected iff RegisterStealthSig is non-empty.
 type BridgeIntentPayload struct {
-	SessionID       string `json:"sessionId"`
-	UserAddress     string `json:"userAddress"`
-	SourceChainID   string `json:"sourceChainId"`
-	SourceToken     Token  `json:"sourceToken"`
-	InboundSafe     string `json:"inboundSafe"`
-	AmountStr       string `json:"amount"` // big.Int as decimal string
-	DestChainID     string `json:"destChainId"`
-	DestToken       Token  `json:"destToken"`
-	DestStealthSafe string `json:"destStealthSafe"`
-	UnixTimestamp   int64  `json:"unixTimestamp"`
+	SessionID            string `json:"sessionId"`
+	UserAddress          string `json:"userAddress"`
+	SourceChainID        string `json:"sourceChainId"`
+	SourceToken          Token  `json:"sourceToken"`
+	InboundSafe          string `json:"inboundSafe"`
+	AmountStr            string `json:"amount"` // big.Int as decimal string
+	DestChainID          string `json:"destChainId"`
+	DestToken            Token  `json:"destToken"`
+	DestStealthSafe      string `json:"destStealthSafe,omitempty"`      // mode 2: FE-generated
+	RegisterStealthSig   string `json:"registerStealthSig,omitempty"`   // mode 1: hex-encoded EIP-712 sig
+	UnixTimestamp        int64  `json:"unixTimestamp"`
 }
 
 // StatusResponse is the GET /bridge/:id body. Mirrors BridgeIntent without

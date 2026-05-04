@@ -76,11 +76,38 @@ func (a *API) Submit(c *gin.Context) {
 		return
 	}
 
-	intent, err := DecryptAndValidate(a.cfg.ECIESPrivateKey, req.Encrypted)
+	intent, registerStealthSig, err := DecryptAndValidate(a.cfg.ECIESPrivateKey, req.Encrypted)
 	if err != nil {
 		log.WithError(err).Warn("Bridge submit rejected")
 		c.JSON(http.StatusBadRequest, SubmitResponse{Success: false, Error: err.Error()})
 		return
+	}
+
+	// Mode 1 (relayer-managed stealth): caller supplied an EIP-712
+	// RegisterStealth signature instead of a destStealthSafe. Bridge
+	// the call into the relayer's existing stealth recipient registry
+	// — the same one tachyon uses — so the user can later recover via
+	// /recipient/derive-stealth-key + /recipient/deploy-safe with
+	// just a wallet sig (no client-side keypair to persist).
+	if registerStealthSig != "" {
+		if err := RegisterRecipient(a.cfg, intent.UserAddress, registerStealthSig); err != nil {
+			log.WithError(err).WithField("sessionID", intent.SessionID).Warn("RegisterRecipient failed")
+			c.JSON(http.StatusBadGateway, SubmitResponse{Success: false, Error: "register recipient with relayer: " + err.Error()})
+			return
+		}
+		_, safeAddr, err := GenerateStealth(a.cfg, intent.UserAddress, intent.DestChainID, intent.SessionID)
+		if err != nil {
+			log.WithError(err).WithField("sessionID", intent.SessionID).Warn("GenerateStealth failed")
+			c.JSON(http.StatusBadGateway, SubmitResponse{Success: false, Error: "generate stealth via relayer: " + err.Error()})
+			return
+		}
+		intent.DestStealthSafe = safeAddr
+		log.WithFields(log.Fields{
+			"sessionID":  intent.SessionID,
+			"userAddr":   intent.UserAddress,
+			"destChain":  intent.DestChainID,
+			"safeAddr":   safeAddr,
+		}).Info("Relayer-managed stealth resolved for privacy intent")
 	}
 
 	// Reject duplicate sessionIDs — clients must pick a fresh one each time.
@@ -141,7 +168,11 @@ func (a *API) Submit(c *gin.Context) {
 		"amount":      intent.Amount.String(),
 	}).Info("Privacy bridge intent accepted")
 
-	c.JSON(http.StatusOK, SubmitResponse{Success: true, SessionID: intent.SessionID})
+	c.JSON(http.StatusOK, SubmitResponse{
+		Success:         true,
+		SessionID:       intent.SessionID,
+		DestStealthSafe: intent.DestStealthSafe,
+	})
 }
 
 // Status returns the lifecycle state of an intent by sessionID.

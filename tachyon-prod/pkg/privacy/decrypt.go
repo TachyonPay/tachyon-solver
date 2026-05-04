@@ -22,39 +22,46 @@ const maxClockSkew = 24 * time.Hour
 // and validates every field against the addresses.go route table. The
 // returned BridgeIntent is fully populated and ready for st.Save.
 //
+// registerStealthSig is the optional EIP-712 signature for relayer-
+// managed stealth sourcing (mode 1) — empty in mode 2. The caller
+// (Submit handler) uses it to bridge into the relayer's
+// /recipient/register flow before persisting the intent. It's
+// returned separately because the BridgeIntent persists long-term
+// and the sig is one-shot.
+//
 // On any structural / validation failure returns a non-nil error and
 // nothing is persisted.
-func DecryptAndValidate(priv *ecies.PrivateKey, encryptedHex string) (*BridgeIntent, error) {
+func DecryptAndValidate(priv *ecies.PrivateKey, encryptedHex string) (intent *BridgeIntent, registerStealthSig string, err error) {
 	if priv == nil {
-		return nil, fmt.Errorf("decrypt: nil private key")
+		return nil, "", fmt.Errorf("decrypt: nil private key")
 	}
 	encryptedHex = strings.TrimPrefix(encryptedHex, "0x")
 	blob, err := hex.DecodeString(encryptedHex)
 	if err != nil {
-		return nil, fmt.Errorf("decrypt: hex decode: %w", err)
+		return nil, "", fmt.Errorf("decrypt: hex decode: %w", err)
 	}
 
 	clear, err := ecies.Decrypt(priv, blob)
 	if err != nil {
-		return nil, fmt.Errorf("decrypt: ECIES: %w", err)
+		return nil, "", fmt.Errorf("decrypt: ECIES: %w", err)
 	}
 
 	var p BridgeIntentPayload
 	if err := json.Unmarshal(clear, &p); err != nil {
-		return nil, fmt.Errorf("decrypt: payload JSON: %w", err)
+		return nil, "", fmt.Errorf("decrypt: payload JSON: %w", err)
 	}
 
 	if err := validatePayload(&p); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	amt, ok := new(big.Int).SetString(p.AmountStr, 10)
 	if !ok || amt.Sign() <= 0 {
-		return nil, fmt.Errorf("amount %q is not a positive integer", p.AmountStr)
+		return nil, "", fmt.Errorf("amount %q is not a positive integer", p.AmountStr)
 	}
 
 	now := time.Now().UTC()
-	intent := &BridgeIntent{
+	intent = &BridgeIntent{
 		SessionID:       p.SessionID,
 		UserAddress:     p.UserAddress,
 		SourceChainID:   p.SourceChainID,
@@ -68,7 +75,7 @@ func DecryptAndValidate(priv *ecies.PrivateKey, encryptedHex string) (*BridgeInt
 		Created:         now,
 		Updated:         now,
 	}
-	return intent, nil
+	return intent, p.RegisterStealthSig, nil
 }
 
 // validatePayload runs structural checks on the decrypted payload before
@@ -84,8 +91,15 @@ func validatePayload(p *BridgeIntentPayload) error {
 	if !common.IsHexAddress(p.InboundSafe) {
 		return fmt.Errorf("inboundSafe %q invalid", p.InboundSafe)
 	}
-	if !common.IsHexAddress(p.DestStealthSafe) {
+	// destStealthSafe is required in mode 2 (FE-generated). In mode 1
+	// (relayer-managed) the privacy router fills it in via the relayer
+	// after decryption — payload-side it's optional. Validity check
+	// runs only when the field is non-empty.
+	if p.DestStealthSafe != "" && !common.IsHexAddress(p.DestStealthSafe) {
 		return fmt.Errorf("destStealthSafe %q invalid", p.DestStealthSafe)
+	}
+	if p.DestStealthSafe == "" && p.RegisterStealthSig == "" {
+		return fmt.Errorf("either destStealthSafe (mode 2) or registerStealthSig (mode 1) is required")
 	}
 	srcTok := NormalizeToken(string(p.SourceToken))
 	dstTok := NormalizeToken(string(p.DestToken))
