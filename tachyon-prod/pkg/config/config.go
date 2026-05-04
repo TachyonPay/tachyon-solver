@@ -70,8 +70,12 @@ func LoadConfig() (*Config, error) {
 			return nil, fmt.Errorf("invalid or missing %sID: %s", prefix, chainIDStr)
 		}
 
+		// BRIDGE is optional — chains where the relayer only batches
+		// Safe execTxs (e.g. for stealth-Safe withdraws on Eth/Arb/Op/
+		// MegaETH) have no tachyon Bridge contract. Solver/rebalancer
+		// paths that read this address simply won't run on those chains.
 		bridgeAddr := getEnv(prefix+"BRIDGE", "")
-		if !common.IsHexAddress(bridgeAddr) {
+		if bridgeAddr != "" && !common.IsHexAddress(bridgeAddr) {
 			return nil, fmt.Errorf("invalid %sBRIDGE address: %s", prefix, bridgeAddr)
 		}
 
