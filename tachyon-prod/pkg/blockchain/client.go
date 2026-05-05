@@ -758,20 +758,32 @@ func (c *Client) RelaySafeTransaction(ctx context.Context, safeAddr common.Addre
 // Returns the concatenated 65*N-byte signature, sorted by signer address
 // ascending — exactly the format Gnosis Safe expects in execTransaction.
 //
-// Used by callers that want to broadcast the resulting tx through a SEPARATE
-// service (e.g. the relayer's RelayProxy endpoint) instead of submitting from
-// this client's EOA.
+// Reads the Safe nonce from chain. For back-to-back submissions through the
+// same RPC, prefer SignSafeTransactionWithNonce so the caller can manage the
+// nonce locally — Alchemy and similar providers can briefly serve a stale
+// nonce after a tx mines, which causes the next signature to be computed
+// against the wrong nonce and revert in execTransaction's checkSignatures.
+//
+// Used by callers that broadcast the resulting tx through a SEPARATE service
+// (e.g. the relayer's RelayProxy endpoint) instead of submitting from this
+// client's EOA.
 func (c *Client) SignSafeTransaction(ctx context.Context, to common.Address, value *big.Int, data []byte, operation uint8) ([]byte, error) {
 	if !c.HasSafe() {
 		return nil, fmt.Errorf("no Safe address configured for this client")
 	}
-	if len(c.safeSigningKeys) == 0 {
-		return nil, fmt.Errorf("no Safe signing keys configured — set SAFE_SIGNER_KEY_1/2/3")
+	nonce, err := c.ReadSafeNonce(ctx)
+	if err != nil {
+		return nil, err
 	}
-	if value == nil {
-		value = big.NewInt(0)
-	}
+	return c.SignSafeTransactionWithNonce(ctx, to, value, data, operation, nonce)
+}
 
+// ReadSafeNonce reads the current nonce from this client's Safe. Returns an
+// error if the Safe isn't configured.
+func (c *Client) ReadSafeNonce(ctx context.Context) (*big.Int, error) {
+	if !c.HasSafe() {
+		return nil, fmt.Errorf("no Safe address configured for this client")
+	}
 	safeABI, err := abi.JSON(strings.NewReader(safeExecABI))
 	if err != nil {
 		return nil, fmt.Errorf("parse safe ABI: %w", err)
@@ -782,7 +794,34 @@ func (c *Client) SignSafeTransaction(ctx context.Context, to common.Address, val
 	if err := safe.Call(&bind.CallOpts{Context: ctx}, &nonceResult, "nonce"); err != nil {
 		return nil, fmt.Errorf("get safe nonce: %w", err)
 	}
-	safeNonce := nonceResult[0].(*big.Int)
+	return nonceResult[0].(*big.Int), nil
+}
+
+// SignSafeTransactionWithNonce is SignSafeTransaction with an explicit nonce.
+// Callers that submit multiple Safe txs back-to-back should track the nonce
+// in-process (incrementing optimistically after each submission accepted by
+// the relayer) instead of re-reading from chain — the chain read is subject
+// to RPC propagation lag and can hand back the pre-tx nonce after the tx has
+// already mined, producing a signature that fails checkSignatures.
+func (c *Client) SignSafeTransactionWithNonce(ctx context.Context, to common.Address, value *big.Int, data []byte, operation uint8, safeNonce *big.Int) ([]byte, error) {
+	if !c.HasSafe() {
+		return nil, fmt.Errorf("no Safe address configured for this client")
+	}
+	if len(c.safeSigningKeys) == 0 {
+		return nil, fmt.Errorf("no Safe signing keys configured — set SAFE_SIGNER_KEY_1/2/3")
+	}
+	if value == nil {
+		value = big.NewInt(0)
+	}
+	if safeNonce == nil {
+		return nil, fmt.Errorf("safeNonce is required")
+	}
+
+	safeABI, err := abi.JSON(strings.NewReader(safeExecABI))
+	if err != nil {
+		return nil, fmt.Errorf("parse safe ABI: %w", err)
+	}
+	safe := bind.NewBoundContract(c.safeAddress, safeABI, c.ethClient, c.ethClient, c.ethClient)
 
 	var hashResult []interface{}
 	if err := safe.Call(&bind.CallOpts{Context: ctx}, &hashResult, "getTransactionHash",

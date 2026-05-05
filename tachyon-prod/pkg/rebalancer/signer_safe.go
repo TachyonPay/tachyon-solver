@@ -42,10 +42,20 @@ import (
 // nonce races within the rebalancer. The relayer's own queue may interleave
 // other Safe ops on the same Safe — operators should not run multiple
 // rebalancer instances against the same Safe concurrently.
+//
+// Each per-chain mutex also gates an in-memory nonce cache. Reading the Safe
+// nonce from chain after a tx mines is not safe in tight loops: Alchemy and
+// similar providers can briefly serve the pre-tx nonce after the tx has
+// already been included, which produces a signature against the wrong nonce
+// and reverts the next execTransaction in checkSignatures. The cache is
+// populated lazily from chain on first use, advanced after every successful
+// relayer-accepted submission, and invalidated (forcing a chain re-read) on
+// any failure path.
 type SafeSigner struct {
 	clients    map[string]*blockchain.Client
 	address    common.Address
 	mu         map[string]*sync.Mutex
+	nonceCache map[string]*big.Int // chainID → next nonce to use; nil = read from chain
 	relayerURL string
 	httpClient *http.Client
 }
@@ -123,9 +133,41 @@ func NewSafeSignerFromClients(clients map[string]*blockchain.Client) (*SafeSigne
 		clients:    clients,
 		address:    safe,
 		mu:         mus,
+		nonceCache: make(map[string]*big.Int, len(clients)),
 		relayerURL: relayerURL,
 		httpClient: &http.Client{Timeout: 60 * time.Second},
 	}, nil
+}
+
+// nextNonce returns the nonce to sign with for the next Safe tx on chainID.
+// Caller must hold s.mu[chainID]. If the cache is empty (first use, or the
+// previous tx errored and invalidated the cache) it reads from chain.
+func (s *SafeSigner) nextNonce(ctx context.Context, chainID string, c *blockchain.Client) (*big.Int, error) {
+	if n := s.nonceCache[chainID]; n != nil {
+		return new(big.Int).Set(n), nil
+	}
+	n, err := c.ReadSafeNonce(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read safe nonce: %w", err)
+	}
+	return n, nil
+}
+
+// commitNonce advances the cached nonce for chainID by 1. Called after the
+// relayer accepts a tx — at that point we've committed to using the nonce we
+// signed with, so the next signature must use nonce+1.
+// Caller must hold s.mu[chainID].
+func (s *SafeSigner) commitNonce(chainID string, used *big.Int) {
+	s.nonceCache[chainID] = new(big.Int).Add(used, big.NewInt(1))
+}
+
+// invalidateNonce clears the cached nonce for chainID, forcing the next
+// nextNonce call to re-read from chain. Called on any submission/mining
+// failure so an external Safe tx (or a stale read) doesn't compound across
+// retries.
+// Caller must hold s.mu[chainID].
+func (s *SafeSigner) invalidateNonce(chainID string) {
+	delete(s.nonceCache, chainID)
 }
 
 // Address returns one of the per-chain Safe addresses. Most callers should
@@ -171,9 +213,16 @@ func (s *SafeSigner) SendTx(ctx context.Context, chainID string, to common.Addre
 		value = big.NewInt(0)
 	}
 
-	// Sign the Safe tx hash locally with the configured TEE key(s).
-	sig, err := c.SignSafeTransaction(ctx, to, value, data, 0)
+	// Sign with the cached nonce (or chain-read on first use). On any error
+	// past this point we invalidate the cache so a subsequent retry starts
+	// from a fresh chain read instead of compounding a stale value.
+	nonce, err := s.nextNonce(ctx, chainID, c)
 	if err != nil {
+		return nil, err
+	}
+	sig, err := c.SignSafeTransactionWithNonce(ctx, to, value, data, 0, nonce)
+	if err != nil {
+		s.invalidateNonce(chainID)
 		return nil, fmt.Errorf("sign safe tx: %w", err)
 	}
 
@@ -192,12 +241,14 @@ func (s *SafeSigner) SendTx(ctx context.Context, chainID string, to common.Addre
 	url := s.relayerURL + "/recipient/relay-proxy"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
+		s.invalidateNonce(chainID)
 		return nil, fmt.Errorf("build relay-proxy request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := s.httpClient.Do(httpReq)
 	if err != nil {
+		s.invalidateNonce(chainID)
 		return nil, fmt.Errorf("relay-proxy request: %w", err)
 	}
 	defer resp.Body.Close()
@@ -205,14 +256,21 @@ func (s *SafeSigner) SendTx(ctx context.Context, chainID string, to common.Addre
 
 	var parsed relayProxyResponse
 	if err := json.Unmarshal(rb, &parsed); err != nil {
+		s.invalidateNonce(chainID)
 		return nil, fmt.Errorf("parse relay-proxy response (%d): %s", resp.StatusCode, string(rb))
 	}
 	if !parsed.Success || parsed.TxHash == "" {
+		s.invalidateNonce(chainID)
 		return nil, fmt.Errorf("relay-proxy refused (%d): %s", resp.StatusCode, parsed.Error)
 	}
 
+	// Relayer accepted the tx — commit the nonce we used so the next signing
+	// call advances to nonce+1 without a chain re-read.
+	s.commitNonce(chainID, nonce)
+
 	log.WithFields(log.Fields{
 		"chain":  chainID,
+		"nonce":  nonce.String(),
 		"to":     to.Hex(),
 		"value":  value.String(),
 		"txHash": parsed.TxHash,
@@ -236,6 +294,13 @@ func (s *SafeSigner) SendTx(ctx context.Context, chainID string, to common.Addre
 }
 
 // SendAndWait sends and blocks on bind.WaitMined.
+//
+// On any non-success outcome (mining error or status != 1) the per-chain
+// nonce cache is invalidated. With safeTxGas=0 / gasPrice=0 (our default),
+// a Safe execTransaction whose inner call fails reverts the OUTER tx —
+// which rolls back the nonce++ inside the Safe. So a chain-reverted Safe
+// tx does NOT consume the nonce, and the cache (which we optimistically
+// advanced when the relayer accepted) is now off-by-one.
 func (s *SafeSigner) SendAndWait(ctx context.Context, chainID string, to common.Address, value *big.Int, data []byte, gasLimit uint64, timeout time.Duration) (*types.Transaction, *types.Receipt, error) {
 	tx, err := s.SendTx(ctx, chainID, to, value, data, gasLimit)
 	if err != nil {
@@ -243,6 +308,7 @@ func (s *SafeSigner) SendAndWait(ctx context.Context, chainID string, to common.
 	}
 	c, ok := s.clients[chainID]
 	if !ok {
+		s.invalidateNonceLocked(chainID)
 		return tx, nil, fmt.Errorf("no Safe client for chain %s", chainID)
 	}
 	if timeout == 0 {
@@ -252,12 +318,27 @@ func (s *SafeSigner) SendAndWait(ctx context.Context, chainID string, to common.
 	defer cancel()
 	rcpt, err := bind.WaitMined(waitCtx, c.EthClient(), tx)
 	if err != nil {
+		s.invalidateNonceLocked(chainID)
 		return tx, nil, fmt.Errorf("wait mined %s: %w", tx.Hash().Hex(), err)
 	}
 	if rcpt.Status != 1 {
+		s.invalidateNonceLocked(chainID)
 		return tx, rcpt, fmt.Errorf("safe tx %s reverted (status %d)", tx.Hash().Hex(), rcpt.Status)
 	}
 	return tx, rcpt, nil
+}
+
+// invalidateNonceLocked acquires the per-chain mutex and clears the cache.
+// Used by SendAndWait callers that don't already hold the mutex (SendTx
+// releases it on return).
+func (s *SafeSigner) invalidateNonceLocked(chainID string) {
+	mu, ok := s.mu[chainID]
+	if !ok {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	s.invalidateNonce(chainID)
 }
 
 // CallReadOnly executes eth_call with msg.sender = Safe address ON THIS CHAIN.
