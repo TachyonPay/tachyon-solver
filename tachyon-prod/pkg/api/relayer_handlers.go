@@ -32,6 +32,7 @@ func (api *RelayerAPI) RegisterRoutes(r *gin.Engine) {
 	r.POST("/verify", api.VerifyIntent)
 	r.POST("/get-routes", api.GetRoutes)
 	r.GET("/get-routes", api.GetRoutesQuery)
+	r.GET("/tokens", api.GetTokens)
 	r.GET("/solvers", api.GetSolvers)
 
 	// Endpoints that require solver/user interaction (not admin-protected)
@@ -596,4 +597,79 @@ func (api *RelayerAPI) GetIntentDetails(c *gin.Context) {
 		Success: true,
 		Intent:  details,
 	})
+}
+
+// GetTokens returns all supported tokens and their per-chain ERC-20 addresses.
+// Optional filters: ?chainId=8453 and/or ?symbol=USDC (AND when both present).
+func (api *RelayerAPI) GetTokens(c *gin.Context) {
+	chainFilter := c.Query("chainId")
+	symbolFilter := c.Query("symbol")
+
+	type networkEntry struct {
+		ChainID string `json:"chainId"`
+		Name    string `json:"name"`
+		Address string `json:"address"`
+	}
+	type tokenEntry struct {
+		Symbol   string         `json:"symbol"`
+		Decimals uint8          `json:"decimals"`
+		Note     string         `json:"note,omitempty"`
+		Networks []networkEntry `json:"networks"`
+	}
+
+	catalog := []tokenEntry{
+		{Symbol: "USDT0", Decimals: 6, Networks: []networkEntry{
+			{"4326", "MegaETH", "0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb"},
+		}},
+		{Symbol: "USDC", Decimals: 6, Networks: []networkEntry{
+			{"8453", "Base", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"},
+			{"1", "Ethereum", "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"},
+			{"42161", "Arbitrum", "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"},
+			{"10", "Optimism", "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"},
+		}},
+		{Symbol: "USDC.e", Decimals: 6, Networks: []networkEntry{
+			{"26514", "Horizen", "0xDF7108f8B10F9b9eC1aba01CCa057268cbf86B6c"},
+		}},
+		{Symbol: "ZEN", Decimals: 18, Networks: []networkEntry{
+			{"8453", "Base", "0xf43eB8De897Fbc7F2502483B2Bef7Bb9EA179229"},
+			{"26514", "Horizen", "0x57da2D504bf8b83Ef304759d9f2648522D7a9280"},
+		}},
+		{Symbol: "ETH", Decimals: 18,
+			Note: "Destination only — native ETH deposits cannot be detected",
+			Networks: []networkEntry{
+				{"4326", "MegaETH", "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"},
+				{"8453", "Base", "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"},
+				{"1", "Ethereum", "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"},
+				{"42161", "Arbitrum", "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"},
+				{"10", "Optimism", "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"},
+			}},
+	}
+
+	result := make([]tokenEntry, 0, len(catalog))
+	for _, t := range catalog {
+		if symbolFilter != "" && !strings.EqualFold(t.Symbol, symbolFilter) {
+			continue
+		}
+		networks := t.Networks
+		if chainFilter != "" {
+			filtered := make([]networkEntry, 0)
+			for _, n := range t.Networks {
+				if n.ChainID == chainFilter {
+					filtered = append(filtered, n)
+				}
+			}
+			if len(filtered) == 0 {
+				continue
+			}
+			networks = filtered
+		}
+		result = append(result, tokenEntry{
+			Symbol:   t.Symbol,
+			Decimals: t.Decimals,
+			Note:     t.Note,
+			Networks: networks,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"tokens": result})
 }
