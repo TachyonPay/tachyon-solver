@@ -33,6 +33,7 @@ type Relayer struct {
 	registeredSolvers map[string]*types.SolverInfo
 	mu               sync.RWMutex
 	txMutexes        map[string]*sync.Mutex
+	oracle           *priceOracle
 }
 
 // solverKey forms the in-memory map key for a solver registration.
@@ -86,6 +87,7 @@ func NewRelayer(cfg *config.Config) (*Relayer, error) {
 		intentDetailsStore: make(map[string]*types.IntentDetails),
 		registeredSolvers:  make(map[string]*types.SolverInfo),
 		txMutexes:          txMutexes,
+		oracle:             newPriceOracle(),
 	}
 
 	// Load persisted data from database
@@ -1017,4 +1019,11 @@ func (r *Relayer) Close() {
 			log.Info("Database closed successfully")
 		}
 	}
+}
+
+
+// FetchPrice returns the consensus USD price for symbol from the relayer's
+// price oracle. Supports all tokens listed in the /tokens endpoint.
+func (r *Relayer) FetchPrice(symbol string) (float64, error) {
+	return r.oracle.FetchConsensusPrice(symbol)
 }
