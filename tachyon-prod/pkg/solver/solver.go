@@ -1828,8 +1828,8 @@ func (o *priceOracle) FetchConsensusPrice(symbol string) (float64, error) {
 		}
 	}
 
-	if len(prices) < 2 {
-		return 0, fmt.Errorf("insufficient price data for %s: only %d source(s) responded", symbol, len(prices))
+	if len(prices) == 0 {
+		return 0, fmt.Errorf("no price data available for %s", symbol)
 	}
 
 	sorted := make([]float64, len(prices))

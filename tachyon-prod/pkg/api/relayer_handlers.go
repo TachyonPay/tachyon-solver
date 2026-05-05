@@ -33,6 +33,7 @@ func (api *RelayerAPI) RegisterRoutes(r *gin.Engine) {
 	r.POST("/get-routes", api.GetRoutes)
 	r.GET("/get-routes", api.GetRoutesQuery)
 	r.GET("/solvers", api.GetSolvers)
+	r.GET("/price", api.GetPrice)
 
 	// Endpoints that require solver/user interaction (not admin-protected)
 	r.POST("/store-recipients", api.StoreRecipients)
@@ -596,4 +597,22 @@ func (api *RelayerAPI) GetIntentDetails(c *gin.Context) {
 		Success: true,
 		Intent:  details,
 	})
+}
+
+// GetPrice returns the consensus USD price for a token symbol.
+// Required query param: symbol (e.g. "ETH", "USDC", "ZEN", "USDT0").
+func (api *RelayerAPI) GetPrice(c *gin.Context) {
+	symbol := c.Query("symbol")
+	if symbol == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "symbol query parameter is required"})
+		return
+	}
+
+	price, err := api.relayer.FetchPrice(symbol)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"symbol": symbol, "priceUsd": price})
 }
