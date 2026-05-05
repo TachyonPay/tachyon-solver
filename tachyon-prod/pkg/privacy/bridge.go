@@ -123,16 +123,33 @@ func (b *Bridger) sendStargate(ctx context.Context, intent *BridgeIntent) (strin
 	}
 	dstRecipient := common.HexToAddress(intent.DestStealthSafe)
 
+	// Skim StargateFeeBps off the user's deposit before bridging. The
+	// deducted amount stays in the TEE Safe (since LzSend only moves
+	// `bridgeAmount` into the OFT pool) and accrues as operator
+	// reserve to fund future LZ messaging fees, paid in source-chain
+	// native ETH by the relayer EOA via msg.value forwarding.
+	// Mirrors tachyon's 2.5% intent-spread compensation.
+	bridgeAmount := new(big.Int).Set(intent.Amount)
+	feeAmount := big.NewInt(0)
+	if b.cfg.StargateFeeBps > 0 {
+		feeAmount = new(big.Int).Mul(intent.Amount, big.NewInt(b.cfg.StargateFeeBps))
+		feeAmount.Div(feeAmount, big.NewInt(10_000))
+		bridgeAmount.Sub(bridgeAmount, feeAmount)
+	}
+
 	log.WithFields(log.Fields{
-		"sessionID":  intent.SessionID,
-		"src":        src,
-		"dst":        dst,
-		"srcToken":   intent.SourceToken,
-		"dstToken":   intent.DestToken,
-		"srcOFT":     srcOFT.Hex(),
-		"dstEid":     dstEid,
-		"recipient":  dstRecipient.Hex(),
-		"amount":     intent.Amount.String(),
+		"sessionID":     intent.SessionID,
+		"src":           src,
+		"dst":           dst,
+		"srcToken":      intent.SourceToken,
+		"dstToken":      intent.DestToken,
+		"srcOFT":        srcOFT.Hex(),
+		"dstEid":        dstEid,
+		"recipient":     dstRecipient.Hex(),
+		"depositAmount": intent.Amount.String(),
+		"bridgeAmount":  bridgeAmount.String(),
+		"operatorFee":   feeAmount.String(),
+		"feeBps":        b.cfg.StargateFeeBps,
 	}).Info("Privacy bridge: Stargate send")
 
 	hash, err := rebalancer.LzSend(
@@ -145,7 +162,7 @@ func (b *Bridger) sendStargate(ctx context.Context, intent *BridgeIntent) (strin
 		dstToken,
 		dstEid,
 		dstRecipient,
-		intent.Amount,
+		bridgeAmount,
 		b.slippagePct,
 		big.NewInt(0),
 	)

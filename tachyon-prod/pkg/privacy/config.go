@@ -3,6 +3,7 @@ package privacy
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	ecies "github.com/ecies/go/v2"
@@ -39,6 +40,23 @@ type Config struct {
 	// sessionID via /bridge/:id).
 	AdminAPIKey string
 
+	// StargateFeeBps is the basis-point skim taken off Stargate-routed
+	// bridges before calling Stargate.send(). The deducted amount
+	// stays in the TEE Safe and is the operator's reserve to fund
+	// future LZ messaging fees (paid in source-chain native ETH by the
+	// relayer EOA via msg.value forwarding, see client.go RelaySafe-
+	// Transaction). Mirrors the 2.5% spread tachyon's intent auction
+	// uses to compensate solvers for their Stargate rebalance costs.
+	//
+	// LI.FI/Across routes are NOT skimmed here — Across already takes
+	// 0.05-0.5% of the bridged amount as their spread, so layering
+	// our own skim on top would be double-charging the user. Operator
+	// absorbs LI.FI's source-chain gas cost out of the relayer EOA's
+	// ETH balance.
+	//
+	// Default 0 = no skim (backwards compatible). 250 = 2.5%.
+	StargateFeeBps int64
+
 	// Per-chain RPC URLs and TEE Safe addresses. Only chains with both
 	// fields populated are considered "live"; missing entries cause the
 	// router to skip routes touching that chain.
@@ -61,9 +79,10 @@ func LoadConfig() (*Config, error) {
 		Port:       getEnv("PRIVACY_PORT", "3003"),
 		DBPath:     getEnv("DB_PATH", "./data"),
 		RelayerURL:  strings.TrimRight(getEnv("RELAYER_URL", "http://relayer:3000"), "/"),
-		LifiAPIKey:  getEnv("LIFI_API_KEY", ""),
-		AdminAPIKey: getEnv("ADMIN_API_KEY", ""),
-		Chains:      map[string]ChainConfig{},
+		LifiAPIKey:     getEnv("LIFI_API_KEY", ""),
+		AdminAPIKey:    getEnv("ADMIN_API_KEY", ""),
+		StargateFeeBps: getEnvInt64("PRIVACY_FEE_BPS_STARGATE", 0),
+		Chains:         map[string]ChainConfig{},
 	}
 
 	// ECIES key. The relayer also reads ECIES_PRIVATE_KEY — reusing the
@@ -123,6 +142,21 @@ func getEnv(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// getEnvInt64 parses an integer env var. Falls back to def on missing or
+// malformed input rather than failing config load — this is for tunables
+// like fee basis points where a typo shouldn't take the service down.
+func getEnvInt64(k string, def int64) int64 {
+	v := os.Getenv(k)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 // ECIESPublicKeyHex returns the service's ECIES public key as an
