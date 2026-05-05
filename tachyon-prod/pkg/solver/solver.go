@@ -272,29 +272,43 @@ func (s *Solver) RegisterWithRelayer() error {
 		})
 	}
 
+	// Iterate every (srcSym, dstSym) pair, including cross-token. The
+	// solver's bid evaluation works in USD via consensus prices
+	// (CoinGecko + KuCoin median), and the on-chain solveIntentOnChain2
+	// transfers tokenB to recipients regardless of whether tokenA == tokenB.
+	// As long as the solver Safe holds the dest token on the dest chain,
+	// it can settle a cross-token intent — the rebalancer's existing
+	// Slipstream USDC↔WETH↔ZEN swap path on Base keeps balances topped up.
+	//
+	// Emitting all combinations restores the pre-rewrite "any token"
+	// behavior in a typed way: same-symbol pairs (USDC↔USDC.e, ZEN↔ZEN)
+	// plus cross-token pairs (USDC↔ZEN, USDC.e↔ZEN). FE catalog grows
+	// from 4 to 8 routes for Base↔Horizen.
 	supportedSyms := []rebalancer.TokenSym{rebalancer.TokenUSDC, rebalancer.TokenZEN}
 	for _, srcChain := range chainIDs {
 		for _, dstChain := range chainIDs {
 			if srcChain == dstChain {
 				continue
 			}
-			for _, sym := range supportedSyms {
-				srcTok, ok := resolveToken(srcChain, sym)
+			for _, srcSym := range supportedSyms {
+				srcTok, ok := resolveToken(srcChain, srcSym)
 				if !ok {
 					continue
 				}
-				dstTok, ok := resolveToken(dstChain, sym)
-				if !ok {
-					continue
+				for _, dstSym := range supportedSyms {
+					dstTok, ok := resolveToken(dstChain, dstSym)
+					if !ok {
+						continue
+					}
+					routes = append(routes, types.Route{
+						SourceChain: srcChain,
+						DestChain:   dstChain,
+						TokenA:      srcTok.symbol,
+						TokenB:      dstTok.symbol,
+					})
+					addToken(srcChain, srcTok)
+					addToken(dstChain, dstTok)
 				}
-				routes = append(routes, types.Route{
-					SourceChain: srcChain,
-					DestChain:   dstChain,
-					TokenA:      srcTok.symbol,
-					TokenB:      dstTok.symbol,
-				})
-				addToken(srcChain, srcTok)
-				addToken(dstChain, dstTok)
 			}
 		}
 	}
