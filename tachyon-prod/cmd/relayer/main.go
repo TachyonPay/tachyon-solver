@@ -63,9 +63,23 @@ func main() {
 	})
 
 	relayerAPI := api.NewRelayerAPI(relayerInstance)
-	
+
 	// Register public routes
 	relayerAPI.RegisterRoutes(router)
+
+	// Register Solana routes when at least one chain is configured as Solana.
+	hasSolana := false
+	for _, chainCfg := range cfg.Chains {
+		if chainCfg.IsSolana() {
+			hasSolana = true
+			break
+		}
+	}
+	if hasSolana {
+		relayerAPI.RegisterSolanaRoutes(router)
+		relayerAPI.RegisterSolanaReadRoutes(router)
+		log.Info("Solana endpoints enabled at /solana/*")
+	}
 
 	// Register admin routes with API key auth
 	adminGroup := router.Group("/admin")

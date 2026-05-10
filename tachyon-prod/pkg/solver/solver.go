@@ -39,6 +39,14 @@ type bidJob struct {
 type Solver struct {
 	cfg                *config.Config
 	clients            map[string]*blockchain.Client
+	// solanaClients holds chain-by-chain Solana clients. Phase 0 keeps these
+	// disjoint from the EVM `clients` map so the existing EVM solver loop is
+	// untouched; phase 1 unifies them behind blockchain.ChainClient.
+	solanaClients      map[string]*blockchain.SolanaClient
+	// solanaCtxCancel cancels the context that drives all Solana per-chain
+	// listener goroutines. Set by Start() when at least one Solana chain is
+	// configured; nil otherwise.
+	solanaCtxCancel    context.CancelFunc
 	store              *storage.Store
 	activeIntents      map[string]*types.IntentStatus // In-memory cache
 	lastProcessedBlock map[string]*big.Int
@@ -70,6 +78,7 @@ func (s *Solver) SetOnIntentSettled(cb func(intentID *big.Int, network string)) 
 // NewSolver creates a new solver instance
 func NewSolver(cfg *config.Config) (*Solver, error) {
 	clients := make(map[string]*blockchain.Client)
+	solanaClients := make(map[string]*blockchain.SolanaClient)
 	txMutexes := make(map[string]*sync.Mutex)
 	bidWorkerPools := make(map[string]chan bidJob)
 
@@ -80,8 +89,37 @@ func NewSolver(cfg *config.Config) (*Solver, error) {
 		return nil, fmt.Errorf("failed to initialize storage: %w", err)
 	}
 
-	// Initialize clients for each configured chain
+	// Initialize clients for each configured chain. EVM and Solana chains use
+	// different runtimes; we hold them in disjoint maps so the existing EVM
+	// loop is untouched. Phase 1 collapses both behind blockchain.ChainClient.
 	for chainID, chainCfg := range cfg.Chains {
+		if chainCfg.IsSolana() {
+			sc, err := blockchain.NewSolanaClient(
+				chainCfg.RpcURL,
+				chainCfg.HeliusRPCURL,
+				chainCfg.SolanaProgramID,
+				chainCfg.ChainID,
+				chainCfg.Name,
+				chainCfg.SolanaCommitment,
+				chainCfg.SolanaPriorityFeeMicroLamports,
+				chainCfg.SolanaUSDCMint,
+				chainCfg.SolanaWSOLMint,
+				cfg.SolverSolanaPrivateKey,
+			)
+			if err != nil {
+				store.Close()
+				return nil, fmt.Errorf("failed to create solana client for chain %s (%s): %w", chainCfg.Name, chainID, err)
+			}
+			solanaClients[chainID] = sc
+			txMutexes[chainID] = &sync.Mutex{}
+			log.WithFields(log.Fields{
+				"chain":     chainCfg.Name,
+				"chainID":   chainID,
+				"programID": chainCfg.SolanaProgramID,
+			}).Info("Solana client initialized")
+			continue
+		}
+
 		client, err := blockchain.NewClient(
 			chainCfg.RpcURL,
 			chainCfg.BridgeAddress,
@@ -111,6 +149,7 @@ func NewSolver(cfg *config.Config) (*Solver, error) {
 	solver := &Solver{
 		cfg:                cfg,
 		clients:            clients,
+		solanaClients:      solanaClients,
 		store:              store,
 		activeIntents:      make(map[string]*types.IntentStatus),
 		lastProcessedBlock: make(map[string]*big.Int),
@@ -208,8 +247,26 @@ func (s *Solver) Start() error {
 		log.WithError(err).Warn("Failed to register with relayer, will continue without registration")
 	}
 
-	for networkKey := range s.cfg.Chains {
+	for networkKey, chainCfg := range s.cfg.Chains {
+		// Solana chains are driven by a websocket-based listener (see
+		// pkg/solver/solana_driver.go); the EVM polling loop is skipped
+		// for them.
+		if chainCfg.IsSolana() {
+			continue
+		}
 		go s.pollEvents(networkKey)
+	}
+
+	// Spawn one driver goroutine per Solana chain. Pass a context derived
+	// from stopChan so Stop() unwinds them cleanly.
+	if len(s.solanaClients) > 0 {
+		ctx, cancel := context.WithCancel(context.Background())
+		s.solanaCtxCancel = cancel
+		go func() {
+			<-s.stopChan
+			cancel()
+		}()
+		s.startSolanaDrivers(ctx)
 	}
 
 	return nil
@@ -538,7 +595,12 @@ func (s *Solver) processEvents(ctx context.Context, networkKey string) error {
 		return nil
 	}
 
-	logs, err := client.GetLogs(ctx, fromBlock, currentBlock, []string{"IntentCreated"})
+	// Subscribe to both source-side intent-creation events: the EVM->EVM
+	// `IntentCreated` and the EVM->Solana `IntentCreatedToSolana`. Both
+	// have `intentId` as the first indexed topic so downstream dispatch
+	// is identical — `solveIntentOnDestinationChain` short-circuits to
+	// the Solana client when it sees a Solana destChainId.
+	logs, err := client.GetLogs(ctx, fromBlock, currentBlock, []string{"IntentCreated", "IntentCreatedToSolana"})
 	if err != nil {
 		return fmt.Errorf("failed to get logs: %w", err)
 	}
@@ -551,15 +613,16 @@ func (s *Solver) processEvents(ctx context.Context, networkKey string) error {
 	}).Debug("Processed blocks")
 
 	for _, eventLog := range logs {
-		intentID, err := client.ParseIntentCreatedEvent(eventLog)
+		intentID, isSolanaDest, err := client.ParseAnyIntentCreatedEvent(eventLog)
 		if err != nil {
-			log.WithError(err).Error("Failed to parse IntentCreated event")
+			log.WithError(err).Error("Failed to parse intent-creation event")
 			continue
 		}
 
 		log.WithFields(log.Fields{
-			"network":  networkKey,
-			"intentID": intentID,
+			"network":      networkKey,
+			"intentID":     intentID,
+			"solanaDest":   isSolanaDest,
 		}).Info("New intent detected")
 
 		go s.handleNewIntent(ctx, networkKey, intentID)
@@ -668,25 +731,85 @@ func (s *Solver) calculateProfitableBid(ctx context.Context, networkKey string, 
 	// daily $-value cap (next step) and the USD profitability check below
 	// need them. Failure to resolve any of these is a hard reject — without
 	// verified pricing we can't safely cap or bid (fail-closed).
+	//
+	// Solana destinations: when the intent's destChainId is a configured
+	// Solana cluster (LayerZero EID, e.g. 40168), the EVM contract stores
+	// `tokenB == address(0)` and the real SPL mint lives in
+	// `solanaIntentExt[intentId].tokenBMint`. We resolve the destination
+	// symbol from the configured chain's known mints (USDC / WSOL) instead
+	// of doing an EVM ERC-20 `symbol()` call. The same branch later on
+	// supplies the destination-side balance check.
 	destChainID := intent.DestChainId.String()
-	destClient, destExists := s.clients[destChainID]
-	if !destExists {
-		log.WithFields(log.Fields{
-			"intentID":    intent.IntentID.String(),
-			"destChainID": destChainID,
-		}).Info("Destination chain not configured, skipping intent")
-		return false, nil
+	var (
+		symbolB     string
+		decimalsB   int
+		destClient  *blockchain.Client          // EVM dest client; nil for Solana
+		destSolana  *blockchain.SolanaClient    // Solana dest client; nil for EVM
+		tokenBAddr  common.Address              // EVM dest token address; zero for Solana
+		tokenBMintB58 string                    // Solana dest mint (base58); empty for EVM
+	)
+
+	if sc := s.findSolanaClientForDestChainID(intent.DestChainId); sc != nil {
+		// Solana destination — fetch the SPL mint from the EVM contract's
+		// solanaIntentExt mapping and translate via the chain config.
+		tokenBMintBytes, _, _, isSolanaDest, err := sourceClient.GetSolanaIntentExt(ctx, intent.IntentID)
+		if err != nil {
+			log.WithError(err).WithField("intentID", intent.IntentID.String()).
+				Info("Failed to read solanaIntentExt, skipping intent")
+			return false, nil
+		}
+		if !isSolanaDest {
+			log.WithField("intentID", intent.IntentID.String()).
+				Info("Intent flagged Solana-dest off-chain but isSolanaDest=false on contract, skipping")
+			return false, nil
+		}
+		chainCfg, _ := s.cfg.GetChainByID(sc.ChainID())
+		mintBase58 := splPubkeyBytesToBase58(tokenBMintBytes[:])
+		sym, ok := splMintToSymbol(chainCfg, mintBase58)
+		if !ok {
+			log.WithFields(log.Fields{
+				"intentID": intent.IntentID.String(),
+				"mint":     mintBase58,
+			}).Info("Solana destination mint not in allowlist, skipping intent")
+			return false, nil
+		}
+		symbolB = sym
+		if d, ok := splMintDecimals(chainCfg, mintBase58); ok {
+			decimalsB = int(d)
+		} else {
+			decimalsB = 6 // sane default for SPL tokens
+		}
+		destSolana = sc
+		tokenBMintB58 = mintBase58
+	} else {
+		// EVM destination — original path.
+		dc, destExists := s.clients[destChainID]
+		if !destExists {
+			log.WithFields(log.Fields{
+				"intentID":    intent.IntentID.String(),
+				"destChainID": destChainID,
+			}).Info("Destination chain not configured, skipping intent")
+			return false, nil
+		}
+		destClient = dc
+		tokenBAddr = common.HexToAddress(intent.TokenB)
+		sym, err := destClient.GetTokenSymbol(ctx, tokenBAddr)
+		if err != nil {
+			log.WithError(err).WithField("token", tokenBAddr.Hex()).Info("Could not resolve TokenB symbol, skipping intent")
+			return false, nil
+		}
+		symbolB = sym
+		dec, err := destClient.GetTokenDecimals(ctx, tokenBAddr)
+		if err != nil {
+			decimalsB = 18
+		} else {
+			decimalsB = int(dec)
+		}
 	}
-	tokenBAddr := common.HexToAddress(intent.TokenB)
 
 	symbolA, err := sourceClient.GetTokenSymbol(ctx, tokenAAddr)
 	if err != nil {
 		log.WithError(err).WithField("token", tokenAAddr.Hex()).Info("Could not resolve TokenA symbol, skipping intent")
-		return false, nil
-	}
-	symbolB, err := destClient.GetTokenSymbol(ctx, tokenBAddr)
-	if err != nil {
-		log.WithError(err).WithField("token", tokenBAddr.Hex()).Info("Could not resolve TokenB symbol, skipping intent")
 		return false, nil
 	}
 	priceA, err := s.oracle.FetchConsensusPrice(symbolA)
@@ -702,10 +825,6 @@ func (s *Solver) calculateProfitableBid(ctx context.Context, networkKey string, 
 	decimalsA, err := sourceClient.GetTokenDecimals(ctx, tokenAAddr)
 	if err != nil {
 		decimalsA = 18
-	}
-	decimalsB, err := destClient.GetTokenDecimals(ctx, tokenBAddr)
-	if err != nil {
-		decimalsB = 18
 	}
 
 	// --- 1. Per-user daily $-value cap. Cap applies across all token types
@@ -818,11 +937,32 @@ func (s *Solver) calculateProfitableBid(ctx context.Context, networkKey string, 
 
 	// --- 4. Destination-chain TokenB balance guard ---
 	// Even if the source-side bid is profitable, skip the intent unless we hold
-	// enough TokenB on the destination chain to fulfill expectedAmountB.
-	destBalance, err := destClient.GetBalance(ctx, tokenBAddr)
-	if err != nil {
-		log.WithError(err).WithField("destChainID", destChainID).Error("Failed to get TokenB balance on dest chain")
-		return false, nil
+	// enough TokenB on the destination chain to fulfill expectedAmountB. Branch
+	// by destination runtime: EVM dest reads ERC-20 balance; Solana dest reads
+	// the SPL token balance at the solver's ATA for the configured mint.
+	var destBalance *big.Int
+	if destSolana != nil {
+		mintPub, err := solanaPubkeyFromBase58(tokenBMintB58)
+		if err != nil {
+			log.WithError(err).WithField("mint", tokenBMintB58).Error("Invalid Solana destination mint")
+			return false, nil
+		}
+		solverPub := destSolana.SignerPubkey()
+		ownerAddr := blockchain.ChainAddress{Kind: "solana", Bytes: solverPub.Bytes()}
+		mintAddr := blockchain.ChainAddress{Kind: "solana", Bytes: mintPub}
+		bal, err := destSolana.BalanceOf(ctx, ownerAddr, mintAddr)
+		if err != nil {
+			log.WithError(err).WithField("destChainID", destChainID).Error("Failed to get Solana TokenB balance")
+			return false, nil
+		}
+		destBalance = bal
+	} else {
+		bal, err := destClient.GetBalance(ctx, tokenBAddr)
+		if err != nil {
+			log.WithError(err).WithField("destChainID", destChainID).Error("Failed to get TokenB balance on dest chain")
+			return false, nil
+		}
+		destBalance = bal
 	}
 
 	destBalanceFloat := new(big.Float).SetInt(destBalance)
@@ -1233,6 +1373,15 @@ func (s *Solver) solveIntentOnDestinationChain(ctx context.Context, sourceNetwor
 	intent, err := sourceClient.GetIntent(ctx, intentID)
 	if err != nil {
 		log.WithError(err).Error("Failed to get intent details from source chain")
+		return
+	}
+
+	// Solana-destination short-circuit. Phase 3 routes EVM->Solana intents
+	// through the Anchor `solve_intent_on_chain2` program instead of the
+	// EVM destination path. Detection is by destChainId matching one of
+	// the configured Solana clients' chain IDs (the LayerZero EID).
+	if sc := s.findSolanaClientForDestChainID(intent.DestChainId); sc != nil {
+		s.dispatchEVMToSolanaSolve(ctx, sourceNetwork, intentID, intent, sc)
 		return
 	}
 
@@ -1748,6 +1897,7 @@ var coinGeckoIDs = map[string]string{
 	"WETH": "weth",
 	"ETH":  "ethereum",
 	"ZEN":  "zencash",
+	"SOL":  "solana",
 }
 
 var coinCapIDs = map[string]string{
@@ -1755,6 +1905,7 @@ var coinCapIDs = map[string]string{
 	"WETH": "ethereum",
 	"ETH":  "ethereum",
 	"ZEN":  "zencash",
+	"SOL":  "solana",
 }
 
 var cryptoCompareSymbols = map[string]string{
@@ -1762,6 +1913,7 @@ var cryptoCompareSymbols = map[string]string{
 	"WETH": "ETH",
 	"ETH":  "ETH",
 	"ZEN":  "ZEN",
+	"SOL":  "SOL",
 }
 
 // binancePairs omits ZEN — no USDT pair exists on Binance.
@@ -1769,6 +1921,7 @@ var binancePairs = map[string]string{
 	"USDC": "USDCUSDT",
 	"WETH": "ETHUSDT",
 	"ETH":  "ETHUSDT",
+	"SOL":  "SOLUSDT",
 }
 
 // symbolAliases maps on-chain ERC20 symbols to the canonical ticker the
@@ -1781,6 +1934,7 @@ var symbolAliases = map[string]string{
 	"WETH":     "ETH",
 	"WBTC":     "BTC",
 	"CBBTC":    "BTC",
+	"WSOL":     "SOL", // wrapped SOL (SPL mint So11...112) prices as SOL
 }
 
 // FetchConsensusPrice queries up to four APIs in parallel and returns the median

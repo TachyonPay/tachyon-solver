@@ -113,9 +113,11 @@ func main() {
 	fmt.Printf("🔐 EIP-712 DomainTypeHash:   %x\n", eip712DomainTypeHash)
 	fmt.Printf("🔐 RegisterTypeHash:         %x\n", registerStealthTypeHash)
 	fmt.Println("🚀 Starting Multi-Chain E2E Test")
-	fmt.Println("Testing 2 bidirectional intent flows:")
-	fmt.Println("  1. Horizen → Base (USDC.e → USDC)")
-	fmt.Println("  2. Base → Horizen (USDC → USDC.e)")
+	fmt.Println("Testing 4 bidirectional intent flows:")
+	fmt.Println("  1. Horizen → Base    (USDC.e → USDC)")
+	fmt.Println("  2. Base    → Horizen (USDC   → USDC.e)")
+	fmt.Println("  3. Horizen → Solana  (USDC.e → SPL devnet USDC)")
+	fmt.Println("  4. Solana  → Horizen (SPL devnet USDC → USDC.e)")
 	fmt.Println()
 
 	ctx := context.Background()
@@ -471,15 +473,77 @@ func main() {
 		}
 	}
 
+	// =====================================================================
+	// SOLANA-INVOLVED LEGS (tests 3 + 4). Skipped cleanly if the Solana
+	// env vars aren't configured — running on an EVM-only setup keeps
+	// the existing 2-leg test green without forcing a Solana RPC.
+	// =====================================================================
+	var solanaResults []*SolanaTestResult
+	solCfg, solCfgErr := loadSolanaTestConfig()
+	if solCfgErr != nil {
+		fmt.Println("\n" + strings.Repeat("=", 80))
+		fmt.Println("⏭️  SKIPPING TESTS 3 + 4 (Solana legs)")
+		fmt.Println(strings.Repeat("=", 80))
+		fmt.Printf("   Reason: %v\n", solCfgErr)
+		fmt.Println("   To enable: configure CHAIN_4_* + SOLVER_SOLANA_PRIVATE_KEY in .env")
+	} else {
+		fmt.Println("\n" + strings.Repeat("=", 80))
+		fmt.Println("🌐 SOLANA-INVOLVED INTENTS (tests 3 + 4)")
+		fmt.Println(strings.Repeat("=", 80))
+
+		bridgeHorizenAddr := common.HexToAddress(cfg.BridgeHorizenAddr)
+
+		// Test 3 — Horizen → Solana
+		r3 := runHorizenToSolana(ctx, cfg, solCfg, wallet, horizenClient, horizenChainID, bridgeHorizenAddr)
+		solanaResults = append(solanaResults, r3)
+
+		// Brief gap between Solana legs to keep nonce/state propagation clean.
+		fmt.Println("\n⏳ Waiting 15 seconds before test 4...")
+		time.Sleep(15 * time.Second)
+
+		// Test 4 — Solana → Horizen
+		r4 := runSolanaToHorizen(ctx, cfg, solCfg, wallet, horizenClient, horizenChainID, bridgeHorizenAddr)
+		solanaResults = append(solanaResults, r4)
+	}
+
 	// Print summary
 	fmt.Println("\n" + strings.Repeat("=", 80))
 	fmt.Println("🎉 Multi-Chain E2E Test Complete!")
 	fmt.Println(strings.Repeat("=", 80))
-	fmt.Printf("\n📊 Bridge Results: %d/%d intents completed successfully\n", successCount, len(createdIntents))
-	fmt.Printf("📊 Stealth Results: %d/%d recipient flows passed\n", stealthSuccessCount, stealthTotalTests)
+	fmt.Printf("\n📊 EVM Bridge Results:    %d/%d intents completed\n", successCount, len(createdIntents))
+	fmt.Printf("📊 Stealth Results:       %d/%d recipient flows passed\n", stealthSuccessCount, stealthTotalTests)
+
+	if len(solanaResults) > 0 {
+		fmt.Println("\n📊 Solana Bridge Results:")
+		for _, r := range solanaResults {
+			status := "✅"
+			if r.Err != nil || (!r.SourceCompleted && !r.DestVerified) {
+				status = "⚠️"
+			}
+			intentIDStr := "?"
+			if r.IntentID != nil {
+				intentIDStr = r.IntentID.String()
+			}
+			fmt.Printf("   %s  %-18s intentID=%s sourceCompleted=%v destVerified=%v\n",
+				status, r.Direction, intentIDStr, r.SourceCompleted, r.DestVerified)
+			if r.Err != nil {
+				fmt.Printf("       err: %v\n", r.Err)
+			} else if r.Note != "" {
+				fmt.Printf("       note: %s\n", r.Note)
+			}
+		}
+	}
+
 	fmt.Println("\n✅ Test Scenarios:")
-	fmt.Println("   ✓ Horizen → Base (USDC.e → USDC)")
-	fmt.Println("   ✓ Base → Horizen (USDC → USDC.e)")
+	fmt.Println("   ✓ Horizen → Base    (USDC.e → USDC)")
+	fmt.Println("   ✓ Base    → Horizen (USDC   → USDC.e)")
+	if len(solanaResults) >= 1 {
+		fmt.Println("   ✓ Horizen → Solana  (USDC.e → SPL devnet USDC)")
+	}
+	if len(solanaResults) >= 2 {
+		fmt.Println("   ✓ Solana  → Horizen (SPL devnet USDC → USDC.e)")
+	}
+
 	fmt.Println("\n🔏 Stealth Flow Tested:")
 	fmt.Println("   ✓ Recipient registration (TEE key generation)")
 	fmt.Println("   ✓ Stealth address + Safe address generation per intent")

@@ -1,0 +1,10 @@
+/Users/shreyaspadmakiran/Desktop/Shreyas/Tachyon/zk-tachyon-solver/solana/target/release/deps/thiserror-1be32fe4290c03d8.d: /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-1.0.69/src/lib.rs /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-1.0.69/src/aserror.rs /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-1.0.69/src/display.rs /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-1.0.69/src/provide.rs
+
+/Users/shreyaspadmakiran/Desktop/Shreyas/Tachyon/zk-tachyon-solver/solana/target/release/deps/libthiserror-1be32fe4290c03d8.rlib: /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-1.0.69/src/lib.rs /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-1.0.69/src/aserror.rs /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-1.0.69/src/display.rs /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-1.0.69/src/provide.rs
+
+/Users/shreyaspadmakiran/Desktop/Shreyas/Tachyon/zk-tachyon-solver/solana/target/release/deps/libthiserror-1be32fe4290c03d8.rmeta: /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-1.0.69/src/lib.rs /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-1.0.69/src/aserror.rs /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-1.0.69/src/display.rs /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-1.0.69/src/provide.rs
+
+/Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-1.0.69/src/lib.rs:
+/Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-1.0.69/src/aserror.rs:
+/Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-1.0.69/src/display.rs:
+/Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-1.0.69/src/provide.rs:

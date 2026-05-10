@@ -28,6 +28,19 @@ type Config struct {
 	// Wallet configuration
 	PrivateKey string
 
+	// SolverSolanaPrivateKey is the solver's ed25519 keypair for Solana, kept
+	// separate from the secp256k1 EVM key. base58-encoded 64-byte secret key
+	// (the standard `solana-keygen` format). Optional — required only when at
+	// least one chain has ChainType=solana.
+	SolverSolanaPrivateKey string
+
+	// RelayerSolanaPrivateKey is the relayer's ed25519 keypair for signing
+	// `settle_intent_with_chain2_verification` on Solana-source intents. It
+	// must be authorized on-chain via `add_relayer` (see solana/migrations/
+	// deploy.ts). Optional — required only when at least one chain has
+	// ChainType=solana AND the relayer is the operator that submits settle.
+	RelayerSolanaPrivateKey string
+
 	// SafeSignerKeys are the 3 TEE private keys that co-sign every Safe transaction.
 	// All keys sign each tx; signatures are sorted by address before submission.
 	// Set via SAFE_SIGNER_KEY_1, SAFE_SIGNER_KEY_2, SAFE_SIGNER_KEY_3.
@@ -70,13 +83,16 @@ func LoadConfig() (*Config, error) {
 			return nil, fmt.Errorf("invalid or missing %sID: %s", prefix, chainIDStr)
 		}
 
-		// BRIDGE is optional — chains where the relayer only batches
-		// Safe execTxs (e.g. for stealth-Safe withdraws on Eth/Arb/Op/
-		// MegaETH) have no tachyon Bridge contract. Solver/rebalancer
-		// paths that read this address simply won't run on those chains.
-		bridgeAddr := getEnv(prefix+"BRIDGE", "")
-		if bridgeAddr != "" && !common.IsHexAddress(bridgeAddr) {
-			return nil, fmt.Errorf("invalid %sBRIDGE address: %s", prefix, bridgeAddr)
+		// CHAIN_i_TYPE = "evm" (default) | "solana".
+		chainTypeStr := strings.ToLower(getEnv(prefix+"TYPE", "evm"))
+		var chainType types.ChainType
+		switch chainTypeStr {
+		case "", "evm":
+			chainType = types.ChainTypeEVM
+		case "solana":
+			chainType = types.ChainTypeSolana
+		default:
+			return nil, fmt.Errorf("invalid %sTYPE: %q (expected 'evm' or 'solana')", prefix, chainTypeStr)
 		}
 
 		rpcURL := getEnv(prefix+"RPC", "")
@@ -84,26 +100,69 @@ func LoadConfig() (*Config, error) {
 			return nil, fmt.Errorf("missing %sRPC", prefix)
 		}
 
-		safeAddr := getEnv(prefix+"SAFE_ADDRESS", "")
-		if safeAddr != "" && !common.IsHexAddress(safeAddr) {
-			return nil, fmt.Errorf("invalid %sSAFE_ADDRESS: %s", prefix, safeAddr)
-		}
-
-		// Multicall3 address: canonical address works on most EVM chains; override per chain if needed.
-		// Set CHAIN_i_MULTICALL3 to the chain-specific address (e.g. Horizen testnet).
-		multicall3Addr := getEnv(prefix+"MULTICALL3", "0xcA11bde05977b3631167028862bE2a173976CA11")
-		if multicall3Addr != "" && !common.IsHexAddress(multicall3Addr) {
-			return nil, fmt.Errorf("invalid %sMULTICALL3 address: %s", prefix, multicall3Addr)
-		}
-
 		chainConfig := types.NetworkConfig{
-			Name:              getEnv(prefix+"NAME", fmt.Sprintf("chain-%s", chainIDStr)),
-			RpcURL:            rpcURL,
-			ChainID:           chainID,
-			BridgeAddress:     bridgeAddr,
-			Explorer:          getEnv(prefix+"EXPLORER", ""),
-			SafeAddress:       safeAddr,
-			Multicall3Address: multicall3Addr,
+			Name:      getEnv(prefix+"NAME", fmt.Sprintf("chain-%s", chainIDStr)),
+			ChainType: chainType,
+			RpcURL:    rpcURL,
+			ChainID:   chainID,
+			Explorer:  getEnv(prefix+"EXPLORER", ""),
+		}
+
+		switch chainType {
+		case types.ChainTypeEVM:
+			// BRIDGE is optional — chains where the relayer only batches
+			// Safe execTxs (e.g. for stealth-Safe withdraws on Eth/Arb/Op/
+			// MegaETH) have no tachyon Bridge contract. Solver/rebalancer
+			// paths that read this address simply won't run on those chains.
+			bridgeAddr := getEnv(prefix+"BRIDGE", "")
+			if bridgeAddr != "" && !common.IsHexAddress(bridgeAddr) {
+				return nil, fmt.Errorf("invalid %sBRIDGE address: %s", prefix, bridgeAddr)
+			}
+
+			safeAddr := getEnv(prefix+"SAFE_ADDRESS", "")
+			if safeAddr != "" && !common.IsHexAddress(safeAddr) {
+				return nil, fmt.Errorf("invalid %sSAFE_ADDRESS: %s", prefix, safeAddr)
+			}
+
+			// Multicall3 address: canonical address works on most EVM chains; override per chain if needed.
+			// Set CHAIN_i_MULTICALL3 to the chain-specific address (e.g. Horizen testnet).
+			multicall3Addr := getEnv(prefix+"MULTICALL3", "0xcA11bde05977b3631167028862bE2a173976CA11")
+			if multicall3Addr != "" && !common.IsHexAddress(multicall3Addr) {
+				return nil, fmt.Errorf("invalid %sMULTICALL3 address: %s", prefix, multicall3Addr)
+			}
+
+			chainConfig.BridgeAddress = bridgeAddr
+			chainConfig.SafeAddress = safeAddr
+			chainConfig.Multicall3Address = multicall3Addr
+
+		case types.ChainTypeSolana:
+			programID := getEnv(prefix+"SOLANA_PROGRAM_ID", "")
+			if programID == "" {
+				return nil, fmt.Errorf("missing %sSOLANA_PROGRAM_ID for solana chain", prefix)
+			}
+			usdcMint := getEnv(prefix+"SOLANA_USDC_MINT", "")
+			if usdcMint == "" {
+				return nil, fmt.Errorf("missing %sSOLANA_USDC_MINT for solana chain", prefix)
+			}
+			wsolMint := getEnv(prefix+"SOLANA_WSOL_MINT", "So11111111111111111111111111111111111111112")
+			heliusURL := getEnv(prefix+"HELIUS_RPC", "")
+			commitment := strings.ToLower(getEnv(prefix+"SOLANA_COMMITMENT", "confirmed"))
+			switch commitment {
+			case "processed", "confirmed", "finalized":
+			default:
+				return nil, fmt.Errorf("invalid %sSOLANA_COMMITMENT: %q", prefix, commitment)
+			}
+			priorityFee, err := strconv.ParseUint(getEnv(prefix+"SOLANA_PRIORITY_FEE_MICROLAMPORTS", "0"), 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid %sSOLANA_PRIORITY_FEE_MICROLAMPORTS: %w", prefix, err)
+			}
+
+			chainConfig.SolanaProgramID = programID
+			chainConfig.SolanaUSDCMint = usdcMint
+			chainConfig.SolanaWSOLMint = wsolMint
+			chainConfig.HeliusRPCURL = heliusURL
+			chainConfig.SolanaCommitment = commitment
+			chainConfig.SolanaPriorityFeeMicroLamports = priorityFee
 		}
 
 		// Use chain ID as the map key
@@ -156,6 +215,26 @@ func LoadConfig() (*Config, error) {
 	cfg.PrivateKey = os.Getenv("PRIVATE_KEY")
 	if cfg.PrivateKey == "" {
 		return nil, fmt.Errorf("PRIVATE_KEY environment variable is required")
+	}
+
+	// Load Solana solver key only if at least one chain is configured as Solana.
+	hasSolana := false
+	for _, c := range cfg.Chains {
+		if c.IsSolana() {
+			hasSolana = true
+			break
+		}
+	}
+	if hasSolana {
+		cfg.SolverSolanaPrivateKey = os.Getenv("SOLVER_SOLANA_PRIVATE_KEY")
+		if cfg.SolverSolanaPrivateKey == "" {
+			return nil, fmt.Errorf("SOLVER_SOLANA_PRIVATE_KEY is required when any chain has TYPE=solana")
+		}
+		// Optional — without it the relayer can still serve reads but
+		// can't drive Solana-source settle. Solver-only setups (where a
+		// separate relayer process holds the relayer key) will set this
+		// in the relayer's environment, not the solver's.
+		cfg.RelayerSolanaPrivateKey = os.Getenv("RELAYER_SOLANA_PRIVATE_KEY")
 	}
 
 	// Load TEE Safe signing keys (optional — only needed when a chain has SAFE_ADDRESS set)

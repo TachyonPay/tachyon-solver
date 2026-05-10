@@ -1,0 +1,9 @@
+/Users/shreyaspadmakiran/Desktop/Shreyas/Tachyon/zk-tachyon-solver/solana/target/debug/deps/solana_invoke-f84a4aafb32f3cb7.d: /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-invoke-0.4.0/src/lib.rs /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-invoke-0.4.0/src/stable_instruction_borrowed.rs /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-invoke-0.4.0/src/../README.md
+
+/Users/shreyaspadmakiran/Desktop/Shreyas/Tachyon/zk-tachyon-solver/solana/target/debug/deps/libsolana_invoke-f84a4aafb32f3cb7.rlib: /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-invoke-0.4.0/src/lib.rs /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-invoke-0.4.0/src/stable_instruction_borrowed.rs /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-invoke-0.4.0/src/../README.md
+
+/Users/shreyaspadmakiran/Desktop/Shreyas/Tachyon/zk-tachyon-solver/solana/target/debug/deps/libsolana_invoke-f84a4aafb32f3cb7.rmeta: /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-invoke-0.4.0/src/lib.rs /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-invoke-0.4.0/src/stable_instruction_borrowed.rs /Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-invoke-0.4.0/src/../README.md
+
+/Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-invoke-0.4.0/src/lib.rs:
+/Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-invoke-0.4.0/src/stable_instruction_borrowed.rs:
+/Users/shreyaspadmakiran/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-invoke-0.4.0/src/../README.md:

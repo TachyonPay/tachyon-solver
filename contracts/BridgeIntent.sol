@@ -39,7 +39,21 @@ contract BridgeIntent is ReentrancyGuard, Ownable {
     // Chain2 tracking for solved intents - using composite key (sourceChainId-intentId)
     // This prevents collisions when same intent ID exists on multiple chains
     mapping(bytes32 => bool) public solvedIntents;
-    
+
+    // Solana-bound intents: when destChainId is a Solana cluster (LayerZero
+    // EID, e.g. 30168 mainnet, 40168 devnet/testnet), the destination token
+    // and recipient are 32-byte Solana pubkeys/PDAs that don't fit in
+    // address(20). We keep the original Intent struct unchanged and store
+    // those extra fields in a parallel mapping. Source-side bookkeeping
+    // (auction, deposit, settle) reuses the existing Intent state machine.
+    struct SolanaIntentExt {
+        bytes32 tokenBMint;       // SPL mint on the destination Solana cluster
+        bytes32 recipient;        // stealth PDA or plain Solana pubkey
+        uint64  destSolanaEID;    // LayerZero EID mirror of destChainId, kept for clarity
+    }
+    mapping(uint256 => SolanaIntentExt) public solanaIntentExt;
+    mapping(uint256 => bool) public isSolanaDestIntent;
+
     uint256 public nextIntentId = 1;
     uint256 public chainId;
     uint256 public constant MIN_AUCTION_DURATION = 5 seconds;
@@ -100,6 +114,24 @@ contract BridgeIntent is ReentrancyGuard, Ownable {
         address indexed solver,
         address tokenB,
         uint256 amountB
+    );
+
+    /// Emitted when a user creates an intent whose destination is a Solana
+    /// cluster. Mirrors `IntentCreated` plus the Solana-only 32-byte fields.
+    /// Solver listeners use this event (not `IntentCreated`) to recognize
+    /// EVM->Solana intents and route delivery through `bridge_intent` on
+    /// Solana.
+    event IntentCreatedToSolana(
+        uint256 indexed intentId,
+        address indexed user,
+        address tokenA,
+        bytes32 tokenBMint,
+        uint256 amountA,
+        uint256 expectedAmountB,
+        uint256 reward,
+        uint64  destSolanaEID,
+        bytes32 recipient,
+        uint256 endTime
     );
 
     modifier onlyAuthorizedRelayer() {
@@ -217,6 +249,106 @@ contract BridgeIntent is ReentrancyGuard, Ownable {
             _destChainId,
             endTime
         );
+    }
+
+    /**
+     * @dev Create a bridging intent whose destination is a Solana cluster.
+     *
+     * The Intent struct is reused for source-side bookkeeping (auction,
+     * deposit, settle) — `tokenB` is set to address(0) since it doesn't
+     * exist on EVM, and `destChainId` is the LayerZero EID for Solana
+     * (e.g. 30168 mainnet, 40168 devnet). The Solana-only fields live in
+     * `solanaIntentExt[intentId]`.
+     *
+     * @param _tokenA           Source token address (ERC-20)
+     * @param _tokenBMint       Destination SPL mint (32 bytes)
+     * @param _amountA          Amount of source token to bridge
+     * @param _expectedAmountB  Expected amount of destination SPL token (in
+     *                          its decimals — typically 6 for USDC, 9 for SOL)
+     * @param _reward           Reward in tokenA for the solver
+     * @param _destSolanaEID    LayerZero EID for the destination Solana
+     *                          cluster (30168 mainnet, 40168 devnet)
+     * @param _recipient        Solana recipient pubkey or stealth PDA
+     * @param _auctionDuration  Auction duration in seconds
+     */
+    function createIntentToSolana(
+        address _tokenA,
+        bytes32 _tokenBMint,
+        uint256 _amountA,
+        uint256 _expectedAmountB,
+        uint256 _reward,
+        uint64  _destSolanaEID,
+        bytes32 _recipient,
+        uint256 _auctionDuration
+    ) external nonReentrant {
+        require(_tokenA != address(0), "Invalid tokenA");
+        require(_tokenBMint != bytes32(0), "Invalid tokenBMint");
+        require(_amountA > 0 && _expectedAmountB > 0, "Invalid amounts");
+        require(_reward > 0, "Invalid reward");
+        require(_destSolanaEID > 0, "Invalid destSolanaEID");
+        require(_recipient != bytes32(0), "Invalid recipient");
+        require(
+            _auctionDuration >= MIN_AUCTION_DURATION && _auctionDuration <= MAX_AUCTION_DURATION,
+            "Invalid auction duration"
+        );
+
+        uint256 intentId = nextIntentId++;
+        uint256 endTime = block.timestamp + _auctionDuration;
+
+        // Pull amountA + reward of tokenA up front. Unlike the EVM->EVM
+        // `createIntent`, there is no tokenA==tokenB shortcut: tokenB lives
+        // on Solana, so the reward is always pulled separately.
+        IERC20(_tokenA).safeTransferFrom(msg.sender, address(this), _amountA);
+        IERC20(_tokenA).safeTransferFrom(msg.sender, address(this), _reward);
+
+        intents[intentId] = Intent({
+            intentId: intentId,
+            user: msg.sender,
+            tokenA: _tokenA,
+            tokenB: address(0),                      // tokenB lives on Solana — sentinel
+            amountA: _amountA,
+            expectedAmountB: _expectedAmountB,
+            reward: _reward,
+            destChainId: uint256(_destSolanaEID),
+            endTime: endTime,
+            winningSolver: address(0),
+            winningBid: 0,
+            completed: false,
+            deposited: false
+        });
+
+        solanaIntentExt[intentId] = SolanaIntentExt({
+            tokenBMint:    _tokenBMint,
+            recipient:     _recipient,
+            destSolanaEID: _destSolanaEID
+        });
+        isSolanaDestIntent[intentId] = true;
+
+        emit IntentCreatedToSolana(
+            intentId,
+            msg.sender,
+            _tokenA,
+            _tokenBMint,
+            _amountA,
+            _expectedAmountB,
+            _reward,
+            _destSolanaEID,
+            _recipient,
+            endTime
+        );
+    }
+
+    /**
+     * @dev Get the Solana-only extension for a Solana-destination intent.
+     */
+    function getSolanaIntentExt(uint256 _intentId)
+        external
+        view
+        validIntentId(_intentId)
+        returns (bytes32 tokenBMint, bytes32 recipient, uint64 destSolanaEID, bool isSolanaDest)
+    {
+        SolanaIntentExt storage ext = solanaIntentExt[_intentId];
+        return (ext.tokenBMint, ext.recipient, ext.destSolanaEID, isSolanaDestIntent[_intentId]);
     }
 
     /**

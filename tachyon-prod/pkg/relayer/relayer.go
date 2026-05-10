@@ -24,6 +24,11 @@ import (
 type Relayer struct {
 	cfg              *config.Config
 	clients          map[string]*blockchain.Client
+	// solanaClients is the relayer's read-only/optionally-signing index of
+	// configured Solana clusters. Used for FE-facing intent reads, Helius
+	// webhook routing, and (optionally) settle dispatch when the relayer
+	// holds an authorized Anchor relayer key.
+	solanaClients    map[string]*blockchain.SolanaClient
 	store            *storage.Store
 	recipientStore   map[string]*types.RecipientInfo   // In-memory cache
 	intentDetailsStore map[string]*types.IntentDetails // In-memory cache
@@ -46,6 +51,7 @@ func solverKey(solverType, address string) string {
 
 func NewRelayer(cfg *config.Config) (*Relayer, error) {
 	clients := make(map[string]*blockchain.Client)
+	solanaClients := make(map[string]*blockchain.SolanaClient)
 	txMutexes := make(map[string]*sync.Mutex)
 
 	// Initialize PebbleDB storage
@@ -56,6 +62,44 @@ func NewRelayer(cfg *config.Config) (*Relayer, error) {
 	}
 
 	for chainID, chainCfg := range cfg.Chains {
+		if chainCfg.IsSolana() {
+			// Relayer Solana clients become writers (for
+			// settle_intent_with_chain2_verification) when
+			// RELAYER_SOLANA_PRIVATE_KEY is provided AND the matching
+			// pubkey has been authorized on-chain via `add_relayer`.
+			// Empty key → read-only mode; settles for Solana-source
+			// intents will fail-fast with a clear error.
+			sc, err := blockchain.NewSolanaClient(
+				chainCfg.RpcURL,
+				chainCfg.HeliusRPCURL,
+				chainCfg.SolanaProgramID,
+				chainCfg.ChainID,
+				chainCfg.Name,
+				chainCfg.SolanaCommitment,
+				chainCfg.SolanaPriorityFeeMicroLamports,
+				chainCfg.SolanaUSDCMint,
+				chainCfg.SolanaWSOLMint,
+				cfg.RelayerSolanaPrivateKey,
+			)
+			if err != nil {
+				store.Close()
+				return nil, fmt.Errorf("relayer solana client for chain %s (%s): %w", chainCfg.Name, chainID, err)
+			}
+			solanaClients[chainID] = sc
+			txMutexes[chainID] = &sync.Mutex{}
+			mode := "read-only"
+			if cfg.RelayerSolanaPrivateKey != "" {
+				mode = "signing (settle-capable)"
+			}
+			log.WithFields(log.Fields{
+				"chain":     chainCfg.Name,
+				"chainID":   chainID,
+				"programID": chainCfg.SolanaProgramID,
+				"mode":      mode,
+			}).Info("Relayer solana client initialized")
+			continue
+		}
+
 		client, err := blockchain.NewClient(
 			chainCfg.RpcURL,
 			chainCfg.BridgeAddress,
@@ -81,6 +125,7 @@ func NewRelayer(cfg *config.Config) (*Relayer, error) {
 	relayer := &Relayer{
 		cfg:                cfg,
 		clients:            clients,
+		solanaClients:      solanaClients,
 		store:              store,
 		recipientStore:     make(map[string]*types.RecipientInfo),
 		intentDetailsStore: make(map[string]*types.IntentDetails),
@@ -495,33 +540,55 @@ func (r *Relayer) DeleteRecipients(intentID string) error {
 // VerifyIntentSolved verifies if an intent has been solved on the destination chain
 // The network parameter is the destination chain where the intent was solved
 // The sourceChainID parameter is the chain ID where the intent was originally created
+//
+// Routes to either the EVM client's `isIntentSolvedOnChain2` or the Solana
+// client's `IsIntentSolvedOnChain2` (which reads the SolvedRecord PDA)
+// depending on which map the destination chain lives in.
 func (r *Relayer) VerifyIntentSolved(ctx context.Context, network string, sourceChainID string, intentID string) (bool, error) {
-	client, ok := r.clients[network]
-	if !ok {
-		return false, fmt.Errorf("network %s not found", network)
-	}
-
 	sourceChainIDBig, ok := new(big.Int).SetString(sourceChainID, 10)
 	if !ok {
 		return false, fmt.Errorf("invalid source chain ID: %s", sourceChainID)
 	}
-
 	intentIDBig, ok := new(big.Int).SetString(intentID, 10)
 	if !ok {
 		return false, fmt.Errorf("invalid intent ID: %s", intentID)
 	}
 
+	// Solana destination — check the SolvedRecord PDA.
+	if sc, ok := r.solanaClients[network]; ok {
+		solved, err := sc.IsIntentSolvedOnChain2(ctx, sourceChainIDBig, intentIDBig)
+		if err != nil {
+			return false, fmt.Errorf("failed to verify Solana intent: %w", err)
+		}
+		return solved, nil
+	}
+
+	// EVM destination — original path.
+	client, ok := r.clients[network]
+	if !ok {
+		return false, fmt.Errorf("network %s not found in EVM or Solana clients", network)
+	}
 	solved, err := client.VerifyIntentSolved(ctx, sourceChainIDBig, intentIDBig)
 	if err != nil {
 		return false, fmt.Errorf("failed to verify intent: %w", err)
 	}
-
 	return solved, nil
 }
 
 // SettleIntent settles an intent with basic verification on the source chain.
 // Verifies the intent is solved on the destination chain before settling.
+//
+// Branches by source-chain runtime: Solana-source intents (req.Network maps
+// into r.solanaClients) settle via the Anchor program; EVM-source intents
+// follow the original path.
 func (r *Relayer) SettleIntent(ctx context.Context, req *types.SettleRequest) (*types.RelayerResponse, error) {
+	// Solana-source short-circuit. The verify+settle flow is symmetric
+	// with EVM but uses the SolanaClient. Lives in a sibling function so
+	// the EVM path below stays untouched.
+	if _, isSolanaSrc := r.solanaClients[req.Network]; isSolanaSrc {
+		return r.settleSolanaSourceIntent(ctx, req)
+	}
+
 	// Get client by chain ID (req.Network is chain ID string like "845320009")
 	client, ok := r.clients[req.Network]
 	if !ok {
@@ -972,6 +1039,41 @@ func (r *Relayer) GetChainInfo() map[string]string {
 		info[networkKey] = fmt.Sprintf("Chain %s (ID: %s)", cfg.Name, cfg.ChainID.String())
 	}
 	return info
+}
+
+// SolanaClients returns the relayer's Solana client map keyed by chain
+// ID (the LayerZero EID, stringified). Empty when no Solana chain is
+// configured. Used by the FE-facing read endpoints.
+func (r *Relayer) SolanaClients() map[string]*blockchain.SolanaClient {
+	return r.solanaClients
+}
+
+// FindSolanaClientByChainID returns the Solana client for a given chain
+// ID string (LZ EID), or nil if not found.
+func (r *Relayer) FindSolanaClientByChainID(chainID string) *blockchain.SolanaClient {
+	return r.solanaClients[chainID]
+}
+
+// SolanaConfigs returns the per-chain Solana NetworkConfig values keyed
+// by chain ID. Used by /solana/program-info to expose the allowlist
+// mints and program ID without leaking other chain config.
+func (r *Relayer) SolanaConfigs() map[string]types.SolanaConfigPublic {
+	out := make(map[string]types.SolanaConfigPublic)
+	for chainID, cfg := range r.cfg.Chains {
+		if !cfg.IsSolana() {
+			continue
+		}
+		out[chainID] = types.SolanaConfigPublic{
+			Name:           cfg.Name,
+			ChainID:        cfg.ChainID.String(),
+			ProgramID:      cfg.SolanaProgramID,
+			USDCMint:       cfg.SolanaUSDCMint,
+			WSOLMint:       cfg.SolanaWSOLMint,
+			Commitment:     cfg.SolanaCommitment,
+			Explorer:       cfg.Explorer,
+		}
+	}
+	return out
 }
 
 // GetIntentDetails retrieves stored intent details including all transaction hashes

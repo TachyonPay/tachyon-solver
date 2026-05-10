@@ -5,15 +5,66 @@ import (
 	"time"
 )
 
-// NetworkConfig defines blockchain network configuration
+// ChainType discriminates the on-chain runtime of a configured chain.
+// EVM chains use go-ethereum + secp256k1 keys; Solana uses solana-go +
+// ed25519 keys + the Anchor bridge_intent program.
+type ChainType string
+
+const (
+	ChainTypeEVM    ChainType = "evm"
+	ChainTypeSolana ChainType = "solana"
+)
+
+// NetworkConfig defines blockchain network configuration.
+//
+// EVM-only fields (BridgeAddress, SafeAddress, Multicall3Address) are
+// ignored when ChainType == ChainTypeSolana. Solana-only fields
+// (SolanaProgramID, SolanaUSDCMint, SolanaWSOLMint, HeliusRPCURL,
+// SolanaCommitment, SolanaPriorityFeeMicroLamports) are ignored for EVM.
+//
+// `ChainID` for Solana is the LayerZero EID (30168 mainnet, 40168 devnet)
+// to keep the cross-chain composite key (sourceChainId, intentId) globally
+// unique across both runtimes.
 type NetworkConfig struct {
-	Name             string
-	RpcURL           string
-	ChainID          *big.Int
-	BridgeAddress    string
-	Explorer         string
-	SafeAddress      string // optional: Gnosis Safe holding liquidity on this chain
-	Multicall3Address string // optional: Multicall3 contract address for relay-batch; defaults to canonical 0xcA11...
+	Name              string
+	ChainType         ChainType
+	RpcURL            string
+	ChainID           *big.Int
+	BridgeAddress     string
+	Explorer          string
+	SafeAddress       string // EVM only — Gnosis Safe holding liquidity on this chain
+	Multicall3Address string // EVM only — Multicall3 contract; defaults to canonical 0xcA11...
+
+	// Solana-only fields
+	SolanaProgramID                string // Anchor `bridge_intent` program ID (base58)
+	SolanaUSDCMint                 string // SPL USDC mint address on this Solana cluster
+	SolanaWSOLMint                 string // wrapped SOL mint (canonical: So11...112)
+	HeliusRPCURL                   string // optional Helius RPC; falls back to RpcURL
+	SolanaCommitment               string // "processed" | "confirmed" | "finalized"; default "confirmed"
+	SolanaPriorityFeeMicroLamports uint64 // priority fee per CU; 0 disables
+}
+
+// SolanaConfigPublic is the FE-safe view of a Solana chain's config —
+// exactly the fields a frontend wallet needs to construct transactions
+// against the bridge_intent program. Excludes any operator secrets
+// (signing keys, private RPC tokens).
+type SolanaConfigPublic struct {
+	Name       string `json:"name"`
+	ChainID    string `json:"chainId"` // LayerZero EID, stringified
+	ProgramID  string `json:"programId"`
+	USDCMint   string `json:"usdcMint"`
+	WSOLMint   string `json:"wsolMint"`
+	Commitment string `json:"commitment"`
+	Explorer   string `json:"explorer,omitempty"`
+}
+
+// IsSolana reports whether the chain is configured as a Solana cluster.
+func (n *NetworkConfig) IsSolana() bool { return n.ChainType == ChainTypeSolana }
+
+// IsEVM reports whether the chain is configured as an EVM chain. EVM is the
+// default when ChainType is empty (so existing configs keep working).
+func (n *NetworkConfig) IsEVM() bool {
+	return n.ChainType == "" || n.ChainType == ChainTypeEVM
 }
 
 // ChainPair represents a source-destination chain pair configuration

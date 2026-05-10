@@ -1,0 +1,2523 @@
+{
+  "address": "64SZByfhWxvxu7haf153RHBvReNUFqz154RNagBbeYwk",
+  "metadata": {
+    "name": "bridge_intent",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Cross-chain bridging intent program — Solana side of the Tachyon BridgeIntent protocol"
+  },
+  "instructions": [
+    {
+      "name": "add_relayer",
+      "discriminator": [
+        184,
+        240,
+        94,
+        199,
+        19,
+        71,
+        21,
+        192
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "relayer"
+        },
+        {
+          "name": "relayer_auth",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  108,
+                  97,
+                  121,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "relayer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "cancel_intent",
+      "discriminator": [
+        67,
+        73,
+        238,
+        244,
+        208,
+        89,
+        225,
+        59
+      ],
+      "accounts": [
+        {
+          "name": "caller",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "intent_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  116,
+                  101,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "intent_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_a_mint"
+        },
+        {
+          "name": "escrow_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "escrow_token_a_ata",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "escrow_authority"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "token_a_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "user"
+        },
+        {
+          "name": "user_token_a_ata",
+          "writable": true
+        },
+        {
+          "name": "winning_solver",
+          "docs": [
+            "account here if no solver was selected (passes the constraint as a no-op",
+            "because winning_bid = 0 will skip the refund)."
+          ]
+        },
+        {
+          "name": "winning_solver_ata",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        }
+      ],
+      "args": [
+        {
+          "name": "intent_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "create_intent",
+      "discriminator": [
+        216,
+        214,
+        79,
+        121,
+        23,
+        194,
+        96,
+        104
+      ],
+      "accounts": [
+        {
+          "name": "user",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_a_mint"
+        },
+        {
+          "name": "token_b_mint",
+          "docs": [
+            "Token-B mint is recorded so the eventual destination delivery can be",
+            "verified. For non-Solana destinations, callers SHOULD pass the",
+            "`token_a_mint` here as a placeholder (Solana stores 32-byte pubkeys",
+            "natively; the canonical destination token address travels in the",
+            "off-chain message)."
+          ]
+        },
+        {
+          "name": "user_token_a_ata",
+          "writable": true
+        },
+        {
+          "name": "escrow_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "escrow_token_a_ata",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "escrow_authority"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "token_a_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "intent_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  116,
+                  101,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "config.next_intent_id",
+                "account": "Config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "intent_bids",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  105,
+                  100,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "config.next_intent_id",
+                "account": "Config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "rent",
+          "address": "SysvarRent111111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount_a",
+          "type": "u64"
+        },
+        {
+          "name": "expected_amount_b",
+          "type": "u64"
+        },
+        {
+          "name": "reward",
+          "type": "u64"
+        },
+        {
+          "name": "dest_chain_id",
+          "type": "u64"
+        },
+        {
+          "name": "recipient",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "auction_duration",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "deposit_and_pickup",
+      "discriminator": [
+        49,
+        115,
+        70,
+        75,
+        171,
+        86,
+        224,
+        249
+      ],
+      "accounts": [
+        {
+          "name": "solver",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "intent_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  116,
+                  101,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "intent_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_a_mint"
+        },
+        {
+          "name": "solver_token_a_ata",
+          "writable": true
+        },
+        {
+          "name": "escrow_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "escrow_token_a_ata",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "escrow_authority"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "token_a_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        }
+      ],
+      "args": [
+        {
+          "name": "intent_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "finalize_auction",
+      "discriminator": [
+        220,
+        209,
+        175,
+        193,
+        57,
+        132,
+        241,
+        168
+      ],
+      "accounts": [
+        {
+          "name": "caller",
+          "signer": true
+        },
+        {
+          "name": "intent_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  116,
+                  101,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "intent_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "intent_bids",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  105,
+                  100,
+                  115
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "intent_id"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "intent_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "initialize",
+      "discriminator": [
+        175,
+        175,
+        109,
+        31,
+        13,
+        152,
+        155,
+        237
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "escrow_authority",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "chain_id",
+          "type": "u64"
+        },
+        {
+          "name": "allowed_token_b_mints",
+          "type": {
+            "array": [
+              "pubkey",
+              2
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "place_bid",
+      "discriminator": [
+        238,
+        77,
+        148,
+        91,
+        200,
+        151,
+        92,
+        146
+      ],
+      "accounts": [
+        {
+          "name": "solver",
+          "signer": true
+        },
+        {
+          "name": "intent_record",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  116,
+                  101,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "intent_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "intent_bids",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  105,
+                  100,
+                  115
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "intent_id"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "intent_id",
+          "type": "u64"
+        },
+        {
+          "name": "bid_amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "register_stealth",
+      "discriminator": [
+        168,
+        238,
+        218,
+        4,
+        158,
+        79,
+        4,
+        63
+      ],
+      "accounts": [
+        {
+          "name": "user",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "stealth_registration",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  116,
+                  101,
+                  97,
+                  108,
+                  116,
+                  104
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              },
+              {
+                "kind": "arg",
+                "path": "ephemeral_salt"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "ephemeral_salt",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "remove_relayer",
+      "discriminator": [
+        154,
+        149,
+        161,
+        231,
+        69,
+        74,
+        136,
+        237
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "relayer",
+          "relations": [
+            "relayer_auth"
+          ]
+        },
+        {
+          "name": "relayer_auth",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  108,
+                  97,
+                  121,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "relayer"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "set_allowed_token_b_mint",
+      "discriminator": [
+        254,
+        58,
+        230,
+        66,
+        57,
+        70,
+        227,
+        98
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "index",
+          "type": "u8"
+        },
+        {
+          "name": "mint",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "settle_intent_with_chain2_verification",
+      "discriminator": [
+        7,
+        42,
+        140,
+        48,
+        21,
+        30,
+        233,
+        168
+      ],
+      "accounts": [
+        {
+          "name": "relayer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "relayer_auth",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  108,
+                  97,
+                  121,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "relayer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "intent_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  116,
+                  101,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "intent_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_a_mint"
+        },
+        {
+          "name": "escrow_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "escrow_token_a_ata",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "escrow_authority"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "token_a_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "winning_solver",
+          "docs": [
+            "Solver receiving the released funds. Must match `intent_record.winning_solver`."
+          ]
+        },
+        {
+          "name": "winning_solver_ata",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        }
+      ],
+      "args": [
+        {
+          "name": "intent_id",
+          "type": "u64"
+        },
+        {
+          "name": "chain2_intent_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "solve_intent_on_chain2",
+      "discriminator": [
+        69,
+        161,
+        170,
+        214,
+        156,
+        30,
+        3,
+        24
+      ],
+      "accounts": [
+        {
+          "name": "solver",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_b_mint"
+        },
+        {
+          "name": "solver_token_b_ata",
+          "writable": true
+        },
+        {
+          "name": "solved_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  111,
+                  108,
+                  118,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "src_chain_id"
+              },
+              {
+                "kind": "arg",
+                "path": "src_intent_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "src_chain_id",
+          "type": "u64"
+        },
+        {
+          "name": "src_intent_id",
+          "type": "u64"
+        },
+        {
+          "name": "user",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "expected_amount_b",
+          "type": "u64"
+        },
+        {
+          "name": "amounts",
+          "type": {
+            "vec": "u64"
+          }
+        }
+      ]
+    },
+    {
+      "name": "sweep_stealth",
+      "discriminator": [
+        47,
+        178,
+        10,
+        61,
+        47,
+        22,
+        161,
+        120
+      ],
+      "accounts": [
+        {
+          "name": "user",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "stealth_registration",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  116,
+                  101,
+                  97,
+                  108,
+                  116,
+                  104
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              },
+              {
+                "kind": "arg",
+                "path": "ephemeral_salt"
+              }
+            ]
+          }
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "stealth_ata",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "stealth_registration"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "user_ata",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        }
+      ],
+      "args": [
+        {
+          "name": "ephemeral_salt",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Config",
+      "discriminator": [
+        155,
+        12,
+        170,
+        224,
+        30,
+        250,
+        204,
+        130
+      ]
+    },
+    {
+      "name": "EscrowAuthority",
+      "discriminator": [
+        28,
+        249,
+        37,
+        100,
+        161,
+        37,
+        215,
+        224
+      ]
+    },
+    {
+      "name": "IntentBids",
+      "discriminator": [
+        127,
+        75,
+        12,
+        223,
+        25,
+        84,
+        164,
+        237
+      ]
+    },
+    {
+      "name": "IntentRecord",
+      "discriminator": [
+        176,
+        14,
+        151,
+        250,
+        200,
+        218,
+        41,
+        101
+      ]
+    },
+    {
+      "name": "RelayerAuth",
+      "discriminator": [
+        150,
+        94,
+        140,
+        87,
+        225,
+        46,
+        141,
+        5
+      ]
+    },
+    {
+      "name": "SolvedRecord",
+      "discriminator": [
+        230,
+        240,
+        3,
+        246,
+        13,
+        71,
+        115,
+        83
+      ]
+    },
+    {
+      "name": "StealthRegistration",
+      "discriminator": [
+        86,
+        98,
+        243,
+        211,
+        175,
+        53,
+        145,
+        215
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "BidPlaced",
+      "discriminator": [
+        135,
+        53,
+        176,
+        83,
+        193,
+        69,
+        108,
+        61
+      ]
+    },
+    {
+      "name": "IntentCancelled",
+      "discriminator": [
+        39,
+        174,
+        74,
+        165,
+        39,
+        101,
+        119,
+        29
+      ]
+    },
+    {
+      "name": "IntentCompleted",
+      "discriminator": [
+        203,
+        107,
+        96,
+        43,
+        219,
+        247,
+        41,
+        16
+      ]
+    },
+    {
+      "name": "IntentCreated",
+      "discriminator": [
+        184,
+        46,
+        156,
+        205,
+        169,
+        254,
+        11,
+        108
+      ]
+    },
+    {
+      "name": "IntentSettled",
+      "discriminator": [
+        112,
+        202,
+        229,
+        173,
+        39,
+        129,
+        254,
+        38
+      ]
+    },
+    {
+      "name": "IntentSolvedOnChain2",
+      "discriminator": [
+        239,
+        207,
+        177,
+        7,
+        218,
+        134,
+        219,
+        123
+      ]
+    },
+    {
+      "name": "IntentWon",
+      "discriminator": [
+        93,
+        118,
+        179,
+        7,
+        126,
+        133,
+        50,
+        216
+      ]
+    },
+    {
+      "name": "SolverDeposited",
+      "discriminator": [
+        105,
+        70,
+        214,
+        17,
+        103,
+        201,
+        47,
+        41
+      ]
+    },
+    {
+      "name": "StealthRegistered",
+      "discriminator": [
+        107,
+        183,
+        234,
+        73,
+        237,
+        244,
+        241,
+        155
+      ]
+    },
+    {
+      "name": "StealthSwept",
+      "discriminator": [
+        240,
+        206,
+        72,
+        75,
+        17,
+        177,
+        92,
+        80
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "InvalidAuctionDuration",
+      "msg": "Auction duration outside allowed range"
+    },
+    {
+      "code": 6001,
+      "name": "InvalidAmount",
+      "msg": "Invalid amount"
+    },
+    {
+      "code": 6002,
+      "name": "InvalidReward",
+      "msg": "Invalid reward"
+    },
+    {
+      "code": 6003,
+      "name": "InvalidDestChainId",
+      "msg": "Invalid destination chain ID"
+    },
+    {
+      "code": 6004,
+      "name": "InvalidRecipient",
+      "msg": "Invalid recipient"
+    },
+    {
+      "code": 6005,
+      "name": "AuctionEnded",
+      "msg": "Auction ended"
+    },
+    {
+      "code": 6006,
+      "name": "AuctionStillActive",
+      "msg": "Auction still active"
+    },
+    {
+      "code": 6007,
+      "name": "AuctionAlreadyFinalized",
+      "msg": "Auction already finalized"
+    },
+    {
+      "code": 6008,
+      "name": "IntentAlreadyCompleted",
+      "msg": "Intent already completed"
+    },
+    {
+      "code": 6009,
+      "name": "NotDeposited",
+      "msg": "Intent not deposited"
+    },
+    {
+      "code": 6010,
+      "name": "AlreadyDeposited",
+      "msg": "Already deposited"
+    },
+    {
+      "code": 6011,
+      "name": "BidNotHigher",
+      "msg": "Bid not higher than previous"
+    },
+    {
+      "code": 6012,
+      "name": "BidderCapReached",
+      "msg": "Bidder cap reached"
+    },
+    {
+      "code": 6013,
+      "name": "NoBids",
+      "msg": "No bids placed"
+    },
+    {
+      "code": 6014,
+      "name": "NotWinningSolver",
+      "msg": "Not the winning solver"
+    },
+    {
+      "code": 6015,
+      "name": "NotAuthorized",
+      "msg": "Not authorized"
+    },
+    {
+      "code": 6016,
+      "name": "TokenMintNotAllowed",
+      "msg": "Token mint not in allowlist"
+    },
+    {
+      "code": 6017,
+      "name": "ArrayLengthMismatch",
+      "msg": "Recipient/amount array length mismatch"
+    },
+    {
+      "code": 6018,
+      "name": "EmptyRecipients",
+      "msg": "Empty recipients"
+    },
+    {
+      "code": 6019,
+      "name": "TotalExceedsExpected",
+      "msg": "Total exceeds expected amount"
+    },
+    {
+      "code": 6020,
+      "name": "TotalExceedsDeposited",
+      "msg": "Total exceeds deposited amount"
+    },
+    {
+      "code": 6021,
+      "name": "IntentAlreadySolved",
+      "msg": "Intent already solved on chain2"
+    },
+    {
+      "code": 6022,
+      "name": "TooEarlyToCancel",
+      "msg": "Too early to cancel"
+    },
+    {
+      "code": 6023,
+      "name": "AllowlistIndexOutOfBounds",
+      "msg": "Allowlist index out of bounds"
+    },
+    {
+      "code": 6024,
+      "name": "AccountMintMismatch",
+      "msg": "Account mint mismatch"
+    },
+    {
+      "code": 6025,
+      "name": "AccountOwnerMismatch",
+      "msg": "Account owner mismatch"
+    },
+    {
+      "code": 6026,
+      "name": "RecipientCountMismatch",
+      "msg": "Recipient ATAs count mismatch"
+    },
+    {
+      "code": 6027,
+      "name": "StealthRegistrationMismatch",
+      "msg": "Stealth registration mismatch"
+    },
+    {
+      "code": 6028,
+      "name": "BidZero",
+      "msg": "Bid must be greater than zero"
+    },
+    {
+      "code": 6029,
+      "name": "Overflow",
+      "msg": "Arithmetic overflow"
+    }
+  ],
+  "types": [
+    {
+      "name": "Bid",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "solver",
+            "type": "pubkey"
+          },
+          {
+            "name": "bid_amount",
+            "type": "u64"
+          },
+          {
+            "name": "timestamp",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BidPlaced",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "intent_id",
+            "type": "u64"
+          },
+          {
+            "name": "solver",
+            "type": "pubkey"
+          },
+          {
+            "name": "bid_amount",
+            "type": "u64"
+          },
+          {
+            "name": "timestamp",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Config",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "chain_id",
+            "type": "u64"
+          },
+          {
+            "name": "allowed_token_b_mints",
+            "type": {
+              "array": [
+                "pubkey",
+                2
+              ]
+            }
+          },
+          {
+            "name": "next_intent_id",
+            "type": "u64"
+          },
+          {
+            "name": "escrow_authority_bump",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "EscrowAuthority",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "IntentBids",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "intent_id",
+            "type": "u64"
+          },
+          {
+            "name": "bids",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "Bid"
+                }
+              }
+            }
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "IntentCancelled",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "intent_id",
+            "type": "u64"
+          },
+          {
+            "name": "user",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "IntentCompleted",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "intent_id",
+            "type": "u64"
+          },
+          {
+            "name": "solver",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "IntentCreated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "intent_id",
+            "type": "u64"
+          },
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "token_a_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "token_b_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount_a",
+            "type": "u64"
+          },
+          {
+            "name": "expected_amount_b",
+            "type": "u64"
+          },
+          {
+            "name": "reward",
+            "type": "u64"
+          },
+          {
+            "name": "dest_chain_id",
+            "type": "u64"
+          },
+          {
+            "name": "recipient",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "end_time",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "IntentRecord",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "intent_id",
+            "type": "u64"
+          },
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "token_a_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "token_b_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount_a",
+            "type": "u64"
+          },
+          {
+            "name": "expected_amount_b",
+            "type": "u64"
+          },
+          {
+            "name": "reward",
+            "type": "u64"
+          },
+          {
+            "name": "dest_chain_id",
+            "type": "u64"
+          },
+          {
+            "name": "recipient",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "end_time",
+            "type": "i64"
+          },
+          {
+            "name": "winning_solver",
+            "type": "pubkey"
+          },
+          {
+            "name": "winning_bid",
+            "type": "u64"
+          },
+          {
+            "name": "completed",
+            "type": "bool"
+          },
+          {
+            "name": "deposited",
+            "type": "bool"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "IntentSettled",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "intent_id",
+            "type": "u64"
+          },
+          {
+            "name": "solver",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount_a",
+            "type": "u64"
+          },
+          {
+            "name": "reward",
+            "type": "u64"
+          },
+          {
+            "name": "winning_bid",
+            "type": "u64"
+          },
+          {
+            "name": "chain2_intent_id",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "IntentSolvedOnChain2",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "src_chain_id",
+            "type": "u64"
+          },
+          {
+            "name": "src_intent_id",
+            "type": "u64"
+          },
+          {
+            "name": "solver",
+            "type": "pubkey"
+          },
+          {
+            "name": "token_b_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "total_amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "IntentWon",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "intent_id",
+            "type": "u64"
+          },
+          {
+            "name": "winning_solver",
+            "type": "pubkey"
+          },
+          {
+            "name": "winning_bid",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RelayerAuth",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "relayer",
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SolvedRecord",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "src_chain_id",
+            "type": "u64"
+          },
+          {
+            "name": "src_intent_id",
+            "type": "u64"
+          },
+          {
+            "name": "solver",
+            "type": "pubkey"
+          },
+          {
+            "name": "token_b_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "total_amount",
+            "type": "u64"
+          },
+          {
+            "name": "solved_at",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SolverDeposited",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "intent_id",
+            "type": "u64"
+          },
+          {
+            "name": "solver",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "StealthRegistered",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "stealth_pda",
+            "type": "pubkey"
+          },
+          {
+            "name": "ephemeral_salt",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "StealthRegistration",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "ephemeral_salt",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "StealthSwept",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "stealth_pda",
+            "type": "pubkey"
+          },
+          {
+            "name": "mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    }
+  ]
+}
