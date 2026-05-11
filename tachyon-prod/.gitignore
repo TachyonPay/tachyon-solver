@@ -7,20 +7,22 @@ bin/
 
 # Bare-named Go binaries compiled with `go build` (Mach-O on macOS, ELF on
 # Linux — no extension on either). Each `cmd/<name>/main.go` produces a
-# binary of the same name at the repo root. Team rebuilds locally with
-# `go build ./cmd/<name>` or skips the build via `go run ./cmd/<name>`.
-deploy-spl-test-tokens
-solana-key-to-base58
-relayer
-solver
-privacy-router
-test-relay-proxy
-verify-prediction
-fund-test-safe
-deploy-tee-safes
-deploy-test-safe
-safe-transfer-out
-test-safe-deploy
+# binary of the same name at THIS directory's root. The leading `/` is
+# critical — without it, `relayer` and `solver` would also match the
+# `pkg/relayer/` and `pkg/solver/` package directories, silently
+# excluding any new .go files placed inside them.
+/deploy-spl-test-tokens
+/solana-key-to-base58
+/relayer
+/solver
+/privacy-router
+/test-relay-proxy
+/verify-prediction
+/fund-test-safe
+/deploy-tee-safes
+/deploy-test-safe
+/safe-transfer-out
+/test-safe-deploy
 
 # Test binary, built with `go test -c`
 *.test
