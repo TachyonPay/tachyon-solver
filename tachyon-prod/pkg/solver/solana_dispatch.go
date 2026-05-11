@@ -19,10 +19,32 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/gagliardetto/solana-go"
 	"github.com/zk-tachyon/tachyon-prod/pkg/blockchain"
 	"github.com/zk-tachyon/tachyon-prod/pkg/types"
 	log "github.com/sirupsen/logrus"
 )
+
+// solanaPubkeyFromString accepts base58 (canonical) or hex-encoded
+// (with/without 0x) 32-byte Solana pubkeys and returns the raw 32 bytes.
+func solanaPubkeyFromString(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	// Try base58 first.
+	if pk, err := solana.PublicKeyFromBase58(s); err == nil {
+		out := make([]byte, 32)
+		copy(out, pk.Bytes())
+		return out, nil
+	}
+	// Hex fallback.
+	cleaned := strings.TrimPrefix(strings.TrimPrefix(s, "0x"), "0X")
+	if len(cleaned) == 64 {
+		b, err := hex.DecodeString(cleaned)
+		if err == nil && len(b) == 32 {
+			return b, nil
+		}
+	}
+	return nil, fmt.Errorf("not a valid Solana pubkey (base58 or 64-hex): %s", s)
+}
 
 // dispatchEVMToSolanaSolve is invoked from solveIntentOnDestinationChain
 // when the destination chain is configured as Solana. It pulls the
@@ -62,23 +84,21 @@ func (s *Solver) dispatchEVMToSolanaSolve(
 		return
 	}
 
-	// Recipients on Solana side: phase 3 supports single-recipient
-	// EVM->Solana intents (the contract's `solanaIntentExt.recipient` is
-	// a single bytes32). The full amount goes there.
 	expectedAmountB := intent.ExpectedAmountB
 	if expectedAmountB == nil || expectedAmountB.Sign() <= 0 {
 		logger.Error("expectedAmountB is non-positive — aborting")
 		return
 	}
 
-	recipientAddr := blockchain.ChainAddress{
-		Kind:  "solana",
-		Bytes: append([]byte(nil), recipient[:]...),
-	}
 	tokenBAddr := blockchain.ChainAddress{
 		Kind:  "solana",
 		Bytes: append([]byte(nil), tokenBMint[:]...),
 	}
+
+	// Recipients: consult relayer's /get-recipients first. If present, fan
+	// out the delivery across N stealth-PDA ATAs. Else fall back to the
+	// single recipient from the on-chain `solanaIntentExt.recipient` field.
+	recipientList, amountList := buildSolanaRecipients(s, intentID, sourceChainID, recipient[:], expectedAmountB, logger)
 	// Pad/truncate the EVM source `user` (20 bytes) to 32 bytes for the
 	// Anchor instruction. The Solana program treats `user` as opaque
 	// 32-byte tag for cross-chain bookkeeping; left-pad with zeros so a
@@ -97,8 +117,8 @@ func (s *Solver) dispatchEVMToSolanaSolve(
 		userAddr,
 		tokenBAddr,
 		expectedAmountB,
-		[]blockchain.ChainAddress{recipientAddr},
-		[]*big.Int{expectedAmountB},
+		recipientList,
+		amountList,
 	)
 	if err != nil {
 		logger.WithError(err).Error("Solana solve_intent_on_chain2 failed")
@@ -106,10 +126,10 @@ func (s *Solver) dispatchEVMToSolanaSolve(
 	}
 
 	logger.WithFields(log.Fields{
-		"sig":         sig,
-		"recipient":   solanaB58Recipient(recipient[:]),
-		"amount":      expectedAmountB.String(),
-		"tokenBMint":  hex.EncodeToString(tokenBMint[:]),
+		"sig":            sig,
+		"recipientCount": len(recipientList),
+		"amount":         expectedAmountB.String(),
+		"tokenBMint":     hex.EncodeToString(tokenBMint[:]),
 	}).Info("Solana solve confirmed; proceeding to settle on source")
 
 	// Settle on the source chain. The EVM relayer handles this via the
@@ -159,4 +179,60 @@ func (s *Solver) findSolanaClientForDestChainID(destChainID *big.Int) *blockchai
 // can swap in canonical base58 once the chain-agnostic key utility lands.
 func solanaB58Recipient(b []byte) string {
 	return strings.ToLower(hex.EncodeToString(b))
+}
+
+// buildSolanaRecipients consults the relayer's /get-recipients endpoint
+// to retrieve an encrypted-then-decrypted list of N stealth-PDA recipients
+// for `intentID`. Falls back to the single on-chain recipient if the
+// relayer has nothing stored.
+//
+// The relayer returns recipient pubkeys as base58 strings; we convert
+// each to a 32-byte ChainAddress for the Anchor instruction.
+func buildSolanaRecipients(
+	s *Solver,
+	intentID *big.Int,
+	sourceChainID *big.Int,
+	onchainRecipient []byte,
+	expectedAmountB *big.Int,
+	logger *log.Entry,
+) ([]blockchain.ChainAddress, []*big.Int) {
+	// Single-recipient fallback (current behavior).
+	fallback := []blockchain.ChainAddress{{
+		Kind:  "solana",
+		Bytes: append([]byte(nil), onchainRecipient...),
+	}}
+	fallbackAmt := []*big.Int{expectedAmountB}
+
+	recipients, amounts, err := s.getRecipientsFromRelayer(intentID.String(), sourceChainID.String())
+	if err != nil {
+		logger.WithError(err).Debug("no stored recipients (using on-chain single recipient)")
+		return fallback, fallbackAmt
+	}
+	if len(recipients) == 0 || len(recipients) != len(amounts) {
+		logger.WithFields(log.Fields{"got": len(recipients), "amounts": len(amounts)}).
+			Warn("stored recipients malformed; using on-chain single recipient")
+		return fallback, fallbackAmt
+	}
+
+	outAddrs := make([]blockchain.ChainAddress, 0, len(recipients))
+	outAmts := make([]*big.Int, 0, len(amounts))
+	for i, r := range recipients {
+		pk, perr := solanaPubkeyFromString(r)
+		if perr != nil {
+			logger.WithFields(log.Fields{"idx": i, "raw": r, "error": perr}).
+				Warn("invalid Solana recipient pubkey; falling back to single recipient")
+			return fallback, fallbackAmt
+		}
+		amt, ok := new(big.Int).SetString(amounts[i], 10)
+		if !ok {
+			logger.WithFields(log.Fields{"idx": i, "raw": amounts[i]}).
+				Warn("invalid amount; falling back to single recipient")
+			return fallback, fallbackAmt
+		}
+		outAddrs = append(outAddrs, blockchain.ChainAddress{Kind: "solana", Bytes: pk})
+		outAmts = append(outAmts, amt)
+	}
+	logger.WithField("recipientCount", len(outAddrs)).
+		Info("EVM→Solana: using multi-recipient list from relayer")
+	return outAddrs, outAmts
 }

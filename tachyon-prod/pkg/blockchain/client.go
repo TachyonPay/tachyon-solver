@@ -86,6 +86,7 @@ func NewClient(rpcURL string, contractAddress string, privateKeyHex string, chai
 		"chainID":          chainID,
 		"safeAddress":      safeAddr.Hex(),
 		"multicall3Addr":   mc3Addr.Hex(),
+		"rpcURL":           rpcURL,
 	}).Info("Blockchain client initialized")
 
 	return &Client{

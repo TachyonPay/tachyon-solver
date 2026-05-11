@@ -285,6 +285,24 @@ func (s *Store) GetRecipientAccount(recipientAddress string) (*types.RecipientAc
 	return &account, nil
 }
 
+// Solana Stealth Record Storage — mirrors RecipientAccount for Solana
+// ed25519 recipients. One account per recipient, with N records inside.
+
+func (s *Store) SaveSolanaRecipientAccount(recipientPubkey string, account *types.SolanaRecipientAccount) error {
+	return s.PutJSON(PrefixSolanaStealth+recipientPubkey, account)
+}
+
+func (s *Store) GetSolanaRecipientAccount(recipientPubkey string) (*types.SolanaRecipientAccount, error) {
+	var account types.SolanaRecipientAccount
+	if err := s.GetJSON(PrefixSolanaStealth+recipientPubkey, &account); err != nil {
+		if err == pebble.ErrNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &account, nil
+}
+
 // SaveStealthToRecipientMapping maps a stealth address back to its recipient
 func (s *Store) SaveStealthToRecipientMapping(stealthAddress string, recipientAddress string) error {
 	key := PrefixStealthByAddr + stealthAddress

@@ -1560,9 +1560,13 @@ func (s *Solver) getRecipientsFromRelayer(intentID string, sourceChainID string)
 	url := fmt.Sprintf("%s/get-recipients/%s?sourceChainId=%s", s.cfg.RelayerURL, intentID, sourceChainID)
 
 	// Use the source chain's solver address — must match winningSolver on-chain.
-	// Map iteration order is random, so we must look up by sourceChainID explicitly.
+	// For Solana-source intents, that's the Solana solver's base58 ed25519
+	// pubkey; for EVM-source, it's the EVM solver's hex address. Look up by
+	// sourceChainID explicitly so map iteration order doesn't bite us.
 	var solverAddr string
-	if srcClient, exists := s.clients[sourceChainID]; exists {
+	if sc, exists := s.solanaClients[sourceChainID]; exists {
+		solverAddr = sc.SignerPubkey().String()
+	} else if srcClient, exists := s.clients[sourceChainID]; exists {
 		solverAddr = srcClient.GetSolverAddress().Hex()
 	} else {
 		for _, c := range s.clients {
@@ -1699,17 +1703,17 @@ func (s *Solver) settleIntent(ctx context.Context, network string, chain1IntentI
 		resp.Body.Close()
 
 		if settleResp.Success {
-			log.WithFields(log.Fields{
-				"intentID": chain1IntentID,
-				"txHash":   settleResp.TransactionHash,
-				"attempts": attempt + 1,
-			}).Info("Intent settled successfully")
-
-			// Update transaction history record to completed
 			settleTxHash := settleResp.SettleTxHash
 			if settleTxHash == "" {
 				settleTxHash = settleResp.TransactionHash
 			}
+			log.WithFields(log.Fields{
+				"intentID": chain1IntentID,
+				"txHash":   settleTxHash,
+				"attempts": attempt + 1,
+			}).Info("Intent settled successfully")
+
+			// Update transaction history record to completed
 			s.completeTransactionRecord(network, chain1IntentID.String(), depositTxHash, solveTxHash, settleTxHash, intent, sourceChainIDStr)
 
 			// Update status
@@ -1892,6 +1896,39 @@ func newPriceOracle() *priceOracle {
 	return &priceOracle{client: &http.Client{Timeout: 5 * time.Second}}
 }
 
+// priceSanityBands holds plausible price ranges for known assets. Used
+// when only one oracle source responds — we accept the single quote if
+// it lands inside the band, reject if it's wildly off (likely API error
+// or manipulated feed). Unknown assets get no constraint (any positive
+// price accepted) since we can't be opinionated about them.
+var priceSanityBands = map[string]struct {
+	lo float64
+	hi float64
+}{
+	"USDC": {0.95, 1.05},
+	"USDT": {0.95, 1.05},
+	"DAI":  {0.95, 1.05},
+	"ETH":  {500, 100_000},
+	"WETH": {500, 100_000},
+	"BTC":  {5_000, 1_000_000},
+	"WBTC": {5_000, 1_000_000},
+	"SOL":  {1, 10_000},
+	"WSOL": {1, 10_000},
+	"ZEN":  {0.1, 1_000},
+}
+
+func priceWithinSanityBand(symbol string, price float64) bool {
+	if price <= 0 {
+		return false
+	}
+	band, ok := priceSanityBands[symbol]
+	if !ok {
+		// Unknown symbol — be permissive but reject obviously absurd values.
+		return price > 0 && price < 1e9
+	}
+	return price >= band.lo && price <= band.hi
+}
+
 var coinGeckoIDs = map[string]string{
 	"USDC": "usd-coin",
 	"WETH": "weth",
@@ -1935,6 +1972,8 @@ var symbolAliases = map[string]string{
 	"WBTC":     "BTC",
 	"CBBTC":    "BTC",
 	"WSOL":     "SOL", // wrapped SOL (SPL mint So11...112) prices as SOL
+	"HZNA":     "USDC", // mock USDC on Horizen testnet
+	"BASEA":    "USDC", // mock USDC on Base Sepolia
 }
 
 // FetchConsensusPrice queries up to four APIs in parallel and returns the median
@@ -1982,8 +2021,22 @@ func (o *priceOracle) FetchConsensusPrice(symbol string) (float64, error) {
 		}
 	}
 
-	if len(prices) < 2 {
-		return 0, fmt.Errorf("insufficient price data for %s: only %d source(s) responded", symbol, len(prices))
+	// Public oracle APIs are noisy and rate-limited. Accept a single
+	// source as long as it falls within a sane band for known assets —
+	// stablecoins clamp to ~$1, volatile assets get an order-of-magnitude
+	// sanity check. Hard-reject only when zero sources respond OR a single
+	// quote is wildly out of band (likely API error / manipulated feed).
+	if len(prices) == 0 {
+		return 0, fmt.Errorf("no price data for %s: all %d source(s) failed", symbol, len(fetchers))
+	}
+	if len(prices) == 1 {
+		single := prices[0]
+		if !priceWithinSanityBand(upper, single) {
+			return 0, fmt.Errorf("single-source price for %s rejected as out-of-band: %.4f", symbol, single)
+		}
+		log.WithFields(log.Fields{"symbol": upper, "price": single, "sources": 1}).
+			Warn("Accepting single-source price (other oracle sources failed but quote is within sanity band)")
+		return math.Round(single*100) / 100, nil
 	}
 
 	sorted := make([]float64, len(prices))

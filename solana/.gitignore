@@ -1,0 +1,26 @@
+# Cargo / Anchor build artifacts — regenerable from `anchor build`.
+# DO NOT commit; the only file inside that you actually need is
+# target/deploy/bridge_intent-keypair.json (the program upgrade authority),
+# and that one should be backed up OUT-OF-REPO, never tracked here.
+target/
+.anchor/
+
+# Local validator state (anchor test starts a fresh validator each time)
+test-ledger/
+
+# Local Solana key files / generated artifacts in workspace root
+*.so
+
+# Anchor IDL output for typescript clients — regenerable
+# (Comment out if you intentionally commit it for FE consumption)
+# target/idl/
+
+# Node deps for migration scripts (`anchor migrate`)
+node_modules/
+yarn-error.log
+.yarn/
+
+# OS / IDE noise
+.DS_Store
+.idea/
+.vscode/

@@ -28,6 +28,7 @@ const (
 	PrefixRecipientAccount = "recipient_account:"
 	PrefixStealthByAddr    = "stealth_by_addr:"
 	PrefixTxHistory        = "tx_history:"
+	PrefixSolanaStealth    = "solana_stealth:" // key: recipient base58 pubkey → SolanaRecipientAccount
 )
 
 // NewStore creates a new PebbleDB store at the given path

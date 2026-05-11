@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/gagliardetto/solana-go"
 	log "github.com/sirupsen/logrus"
 	"github.com/zk-tachyon/tachyon-prod/pkg/blockchain"
 	"github.com/zk-tachyon/tachyon-prod/pkg/rebalancer"
@@ -296,9 +297,78 @@ func (s *Solver) dispatchPostSolanaDeposit(
 		"amountB":       expectedAmountB.String(),
 	}).Info("Solana->EVM: dispatching solveIntentOnChain2")
 
+	// Cross-decimal scaling: SPL token decimals vary per mint (USDC=6,
+	// SOL/WSOL=9, others arbitrary). EVM token decimals also vary
+	// per ERC20. Read BOTH dynamically from on-chain so the math is
+	// always correct regardless of which mint/token pair the user uses.
+	//
+	// Source: SPL mint stored in the IntentRecord (snap.TokenA).
+	// Dest:   ERC20 contract on the EVM chain (evmTokenB).
+	srcMintPubkey := solana.PublicKeyFromBytes(snap.TokenA.Bytes)
+	srcDecimalsU8, srcDecErr := sc.GetMintDecimals(ctx, srcMintPubkey)
+	if srcDecErr != nil {
+		logger.WithError(srcDecErr).Warn("Solana->EVM: couldn't fetch source mint decimals; assuming 6")
+		srcDecimalsU8 = 6
+	}
+	dstDecimalsU8, dstDecErr := evmClient.GetTokenDecimals(ctx, evmTokenB)
+	if dstDecErr != nil {
+		logger.WithError(dstDecErr).Warn("Solana->EVM: couldn't fetch dest token decimals; assuming same as source (no scaling)")
+		dstDecimalsU8 = srcDecimalsU8
+	}
+	srcDecimals := int(srcDecimalsU8)
+	dstDecimals := int(dstDecimalsU8)
+
+	// Scale up when destination uses more decimals, down (lossy) when fewer.
+	// Equal decimals → factor = 1, passthrough.
+	scaleFactor := new(big.Int).SetInt64(1)
+	switch {
+	case dstDecimals > srcDecimals:
+		scaleFactor.Exp(big.NewInt(10), big.NewInt(int64(dstDecimals-srcDecimals)), nil)
+	case dstDecimals < srcDecimals:
+		// Down-scale by integer division. Truncates fractional source
+		// units that don't fit in the destination's lower precision.
+		divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(srcDecimals-dstDecimals)), nil)
+		scaleFactor.SetInt64(0) // sentinel: divide instead of multiply below
+		_ = divisor
+		logger.WithFields(log.Fields{"srcDecimals": srcDecimals, "dstDecimals": dstDecimals}).
+			Warn("Solana->EVM: destination has fewer decimals than source; amounts will be truncated")
+	}
+
+	scaleAmount := func(raw *big.Int) *big.Int {
+		if dstDecimals == srcDecimals {
+			return new(big.Int).Set(raw)
+		}
+		if dstDecimals > srcDecimals {
+			return new(big.Int).Mul(raw, scaleFactor)
+		}
+		divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(srcDecimals-dstDecimals)), nil)
+		return new(big.Int).Quo(raw, divisor)
+	}
+
+	scaledExpectedAmountB := scaleAmount(expectedAmountB)
+	logger.WithFields(log.Fields{
+		"srcMint":               srcMintPubkey.String(),
+		"srcDecimals":           srcDecimals,
+		"dstToken":              evmTokenB.Hex(),
+		"dstDecimals":           dstDecimals,
+		"rawExpectedAmountB":    expectedAmountB.String(),
+		"scaledExpectedAmountB": scaledExpectedAmountB.String(),
+	}).Info("Solana->EVM: cross-decimal scaling applied")
+
+	// Recipients: consult relayer's /get-recipients first. If present, fan
+	// out to N predicted Safe addresses; else fall back to the single
+	// recipient from the on-chain IntentRecord. Per-recipient amounts also
+	// get the same scaling.
+	evmRecipientsRaw, evmAmountsRaw := buildEVMRecipients(s, intentID, sc.ChainID(), recipientAddr, expectedAmountB, logger)
+	evmRecipients := evmRecipientsRaw
+	evmAmounts := make([]*big.Int, len(evmAmountsRaw))
+	for i, a := range evmAmountsRaw {
+		evmAmounts[i] = new(big.Int).Mul(a, scaleFactor)
+	}
+
 	approveCtx, approveCancel := context.WithTimeout(ctx, 90*time.Second)
 	defer approveCancel()
-	approveTx, err := evmClient.ApproveToken(approveCtx, evmTokenB, expectedAmountB)
+	approveTx, err := evmClient.ApproveToken(approveCtx, evmTokenB, scaledExpectedAmountB)
 	if err != nil {
 		logger.WithError(err).Error("Solana->EVM: approveToken failed")
 		return
@@ -317,9 +387,9 @@ func (s *Solver) dispatchPostSolanaDeposit(
 		intentID,
 		recipientAddr,                    // _user (event bookkeeping)
 		evmTokenB,
-		expectedAmountB,
-		[]common.Address{recipientAddr},  // single recipient
-		[]*big.Int{expectedAmountB},
+		scaledExpectedAmountB,
+		evmRecipients,
+		evmAmounts,
 	)
 	if err != nil {
 		logger.WithError(err).Error("Solana->EVM: solveIntentOnChain2 failed")
@@ -348,6 +418,55 @@ func (s *Solver) dispatchPostSolanaDeposit(
 		nil,                       // no EVM-shaped types.Intent for Solana-source
 		sc.ChainID().String(),
 	)
+}
+
+// buildEVMRecipients consults the relayer's /get-recipients for the
+// Solana-source intent. If present, returns N predicted-Safe addresses
+// and their split amounts. Falls back to single-recipient delivery using
+// the on-chain IntentRecord.recipient (the EVM address derived from
+// snap.Recipient.Bytes[12:]) when nothing is stored.
+func buildEVMRecipients(
+	s *Solver,
+	intentID *big.Int,
+	sourceChainID *big.Int,
+	onchainRecipient common.Address,
+	expectedAmountB *big.Int,
+	logger *log.Entry,
+) ([]common.Address, []*big.Int) {
+	fallback := []common.Address{onchainRecipient}
+	fallbackAmt := []*big.Int{expectedAmountB}
+
+	recipients, amounts, err := s.getRecipientsFromRelayer(intentID.String(), sourceChainID.String())
+	if err != nil {
+		logger.WithError(err).Debug("no stored recipients (using single on-chain recipient)")
+		return fallback, fallbackAmt
+	}
+	if len(recipients) == 0 || len(recipients) != len(amounts) {
+		logger.WithFields(log.Fields{"got": len(recipients), "amounts": len(amounts)}).
+			Warn("stored recipients malformed; using single on-chain recipient")
+		return fallback, fallbackAmt
+	}
+
+	outAddrs := make([]common.Address, 0, len(recipients))
+	outAmts := make([]*big.Int, 0, len(amounts))
+	for i, r := range recipients {
+		if !common.IsHexAddress(r) {
+			logger.WithFields(log.Fields{"idx": i, "raw": r}).
+				Warn("invalid EVM recipient hex; falling back to single recipient")
+			return fallback, fallbackAmt
+		}
+		amt, ok := new(big.Int).SetString(amounts[i], 10)
+		if !ok {
+			logger.WithFields(log.Fields{"idx": i, "raw": amounts[i]}).
+				Warn("invalid amount; falling back to single recipient")
+			return fallback, fallbackAmt
+		}
+		outAddrs = append(outAddrs, common.HexToAddress(r))
+		outAmts = append(outAmts, amt)
+	}
+	logger.WithField("recipientCount", len(outAddrs)).
+		Info("Solana→EVM: using multi-recipient list from relayer")
+	return outAddrs, outAmts
 }
 
 // scheduleSolanaFinalize sleeps until the auction window closes, then

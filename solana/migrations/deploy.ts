@@ -55,7 +55,7 @@ module.exports = async function (provider: anchor.AnchorProvider) {
   const configAcct = await provider.connection.getAccountInfo(configPda);
   if (configAcct === null) {
     console.log("\n[1/2] initialize ...");
-    const tx = await program.methods
+    const tx = await (program.methods as any)
       .initialize(new BN(chainId), [usdcMint, wsolMint])
       .accounts({
         payer: owner,
@@ -80,7 +80,7 @@ module.exports = async function (provider: anchor.AnchorProvider) {
     const existing = await provider.connection.getAccountInfo(relayerAuthPda);
     if (existing === null) {
       console.log("\n[2/2] add_relayer", relayer.toBase58(), "...");
-      const tx = await program.methods
+      const tx = await (program.methods as any)
         .addRelayer()
         .accounts({
           owner,
@@ -96,5 +96,42 @@ module.exports = async function (provider: anchor.AnchorProvider) {
     }
   } else {
     console.log("\n[2/2] add_relayer: BRIDGE_INTENT_RELAYER_PUBKEY not set, skipping");
+  }
+
+  // Sync allowed_token_b_mints with env. Slot 0 = USDC, slot 1 = WSOL (or
+  // whatever we configured). Idempotent: only writes if the on-chain value
+  // differs from the env-supplied mint.
+  //
+  // Config layout: 8 disc + 32 owner + 8 chainId + 64 (mint[0] + mint[1]) + ...
+  // mint[0] starts at byte 48, mint[1] at byte 80.
+  const cfgAcct = await provider.connection.getAccountInfo(configPda);
+  if (cfgAcct) {
+    const onchainMint0 = new PublicKey(cfgAcct.data.subarray(48, 80));
+    const onchainMint1 = new PublicKey(cfgAcct.data.subarray(80, 112));
+    console.log("\n[3/3] sync allowed_token_b_mints");
+    console.log("      onchain[0] =", onchainMint0.toBase58(), "  desired =", usdcMint.toBase58());
+    console.log("      onchain[1] =", onchainMint1.toBase58(), "  desired =", wsolMint.toBase58());
+
+    const desired: [number, PublicKey][] = [
+      [0, usdcMint],
+      [1, wsolMint],
+    ];
+    const onchain = [onchainMint0, onchainMint1];
+
+    for (const [idx, mint] of desired) {
+      if (onchain[idx].equals(mint)) {
+        console.log(`      slot ${idx}: already ${mint.toBase58()}, skipping`);
+        continue;
+      }
+      console.log(`      slot ${idx}: updating to ${mint.toBase58()} ...`);
+      const tx = await (program.methods as any)
+        .setAllowedTokenBMint(idx, mint)
+        .accounts({
+          owner,
+          config: configPda,
+        })
+        .rpc();
+      console.log("           ok:", tx);
+    }
   }
 };

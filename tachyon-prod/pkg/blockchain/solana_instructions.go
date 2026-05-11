@@ -13,13 +13,13 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"time"
 
 	"github.com/gagliardetto/solana-go"
 	atok "github.com/gagliardetto/solana-go/programs/associated-token-account"
 	cb "github.com/gagliardetto/solana-go/programs/compute-budget"
 	"github.com/gagliardetto/solana-go/programs/token"
-	confirm "github.com/gagliardetto/solana-go/rpc/sendAndConfirmTransaction"
-	"github.com/gagliardetto/solana-go/rpc/ws"
+	"github.com/gagliardetto/solana-go/rpc"
 )
 
 // ----- Initialize / admin -----
@@ -491,14 +491,6 @@ func (c *SolanaClient) sendIxs(
 	if len(signers) == 0 {
 		return "", errors.New("at least one signer required")
 	}
-	if c.wsURL == "" {
-		return "", errors.New("solana ws url not configured (needed for confirmation)")
-	}
-	wsCli, err := ws.Connect(ctx, c.wsURL)
-	if err != nil {
-		return "", fmt.Errorf("ws connect: %w", err)
-	}
-	defer wsCli.Close()
 
 	if c.priorityFee > 0 {
 		fee := cb.NewSetComputeUnitPriceInstructionBuilder().
@@ -507,7 +499,19 @@ func (c *SolanaClient) sendIxs(
 		instructions = append([]solana.Instruction{fee}, instructions...)
 	}
 
-	hash, err := c.rpcClient.GetLatestBlockhash(ctx, c.commitment)
+	signerMap := map[solana.PublicKey]*solana.PrivateKey{}
+	for i := range signers {
+		pk := signers[i]
+		signerMap[pk.PublicKey()] = &pk
+	}
+
+	// Public devnet RPC (and Helius load-balanced shards) routinely route
+	// preflight simulation to a different replica than the one that
+	// returned the blockhash, surfacing as "Blockhash not found" before
+	// the tx ever reaches the leader. Workaround: skip preflight entirely
+	// and confirm by polling signature status. The leader accepts any
+	// blockhash within the 150-slot window.
+	hash, err := c.rpcClient.GetLatestBlockhash(ctx, rpc.CommitmentProcessed)
 	if err != nil {
 		return "", fmt.Errorf("getLatestBlockhash: %w", err)
 	}
@@ -519,24 +523,42 @@ func (c *SolanaClient) sendIxs(
 	if err != nil {
 		return "", fmt.Errorf("build tx: %w", err)
 	}
-	signerMap := map[solana.PublicKey]*solana.PrivateKey{}
-	for i := range signers {
-		pk := signers[i]
-		signerMap[pk.PublicKey()] = &pk
-	}
-	_, err = tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
+	if _, err := tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
 		if pk, ok := signerMap[key]; ok {
 			return pk
 		}
 		return nil
-	})
-	if err != nil {
+	}); err != nil {
 		return "", fmt.Errorf("sign: %w", err)
 	}
 
-	sig, err := confirm.SendAndConfirmTransaction(ctx, c.rpcClient, wsCli, tx)
+	sig, err := c.rpcClient.SendTransactionWithOpts(ctx, tx, rpc.TransactionOpts{
+		SkipPreflight:       true,
+		PreflightCommitment: c.commitment,
+	})
 	if err != nil {
-		return "", fmt.Errorf("send/confirm: %w", err)
+		return "", fmt.Errorf("send: %w", err)
 	}
-	return sig.String(), nil
+
+	// Poll signature status until confirmed (or timeout).
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		stRes, err := c.rpcClient.GetSignatureStatuses(ctx, false, sig)
+		if err == nil && stRes != nil && len(stRes.Value) > 0 && stRes.Value[0] != nil {
+			st := stRes.Value[0]
+			if st.Err != nil {
+				return sig.String(), fmt.Errorf("tx %s reverted on-chain: %v", sig, st.Err)
+			}
+			if st.ConfirmationStatus == rpc.ConfirmationStatusConfirmed ||
+				st.ConfirmationStatus == rpc.ConfirmationStatusFinalized {
+				return sig.String(), nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return sig.String(), ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return sig.String(), fmt.Errorf("tx %s not confirmed within timeout", sig)
 }

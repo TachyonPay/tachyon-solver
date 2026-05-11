@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/big"
 	"sync"
+	"time"
 
 	"github.com/gagliardetto/solana-go"
 	atok "github.com/gagliardetto/solana-go/programs/associated-token-account"
@@ -156,55 +157,122 @@ func (c *SolanaClient) SubscribeIntentEvents(ctx context.Context, handler func(I
 	if c.wsURL == "" {
 		return nil, errors.New("solana ws url not configured (set CHAIN_*_RPC to wss:// or provide HELIUS_RPC)")
 	}
-	wsClient, err := ws.Connect(ctx, c.wsURL)
+
+	// Validate the URL is reachable up-front so caller sees fail-fast
+	// behavior on misconfiguration. Auto-reconnect handles transient drops
+	// after this point.
+	probe, err := ws.Connect(ctx, c.wsURL)
 	if err != nil {
 		return nil, fmt.Errorf("ws connect: %w", err)
 	}
+	probe.Close()
 
-	c.mu.Lock()
-	c.wsClient = wsClient
-	c.mu.Unlock()
-
-	sub, err := wsClient.LogsSubscribeMentions(c.programID, c.commitment)
-	if err != nil {
-		wsClient.Close()
-		return nil, fmt.Errorf("logsSubscribe: %w", err)
-	}
-
+	// Independent cancel channel so the caller can stop the reconnect loop.
+	stopCh := make(chan struct{})
+	var stopOnce sync.Once
 	cancel := func() {
-		sub.Unsubscribe()
-		c.mu.Lock()
-		if c.wsClient != nil {
-			c.wsClient.Close()
-			c.wsClient = nil
-		}
-		c.mu.Unlock()
+		stopOnce.Do(func() {
+			close(stopCh)
+			c.mu.Lock()
+			if c.wsClient != nil {
+				c.wsClient.Close()
+				c.wsClient = nil
+			}
+			c.mu.Unlock()
+		})
 	}
 
 	go func() {
-		defer cancel()
+		backoff := time.Second
+		const maxBackoff = 30 * time.Second
 		for {
+			// Outer cancellation check.
 			select {
 			case <-ctx.Done():
 				return
+			case <-stopCh:
+				return
 			default:
 			}
-			res, err := sub.Recv(ctx)
+
+			wsClient, err := ws.Connect(ctx, c.wsURL)
 			if err != nil {
-				log.WithError(err).Warn("solana logsSubscribe recv error")
-				return
-			}
-			if res == nil || res.Value.Err != nil {
+				log.WithError(err).Warn("solana ws connect failed, will retry")
+				if !sleepOrCancel(ctx, stopCh, backoff) {
+					return
+				}
+				backoff = min(backoff*2, maxBackoff)
 				continue
 			}
-			events := parseAnchorEvents(res.Value.Logs, res.Value.Signature.String(), 0)
-			for _, evt := range events {
-				handler(evt)
+			c.mu.Lock()
+			c.wsClient = wsClient
+			c.mu.Unlock()
+
+			sub, err := wsClient.LogsSubscribeMentions(c.programID, c.commitment)
+			if err != nil {
+				log.WithError(err).Warn("solana logsSubscribe failed, will reconnect")
+				wsClient.Close()
+				if !sleepOrCancel(ctx, stopCh, backoff) {
+					return
+				}
+				backoff = min(backoff*2, maxBackoff)
+				continue
+			}
+			log.WithField("programID", c.programID.String()).Info("solana logsSubscribe attached")
+			backoff = time.Second // reset after a successful subscribe
+
+			// Inner receive loop — exits on any recv error so the outer loop
+			// can reconnect with a fresh socket.
+		recvLoop:
+			for {
+				select {
+				case <-ctx.Done():
+					sub.Unsubscribe()
+					wsClient.Close()
+					return
+				case <-stopCh:
+					sub.Unsubscribe()
+					wsClient.Close()
+					return
+				default:
+				}
+				res, err := sub.Recv(ctx)
+				if err != nil {
+					log.WithError(err).Warn("solana logsSubscribe recv error; reconnecting")
+					sub.Unsubscribe()
+					wsClient.Close()
+					break recvLoop
+				}
+				if res == nil || res.Value.Err != nil {
+					continue
+				}
+				events := parseAnchorEvents(res.Value.Logs, res.Value.Signature.String(), 0)
+				for _, evt := range events {
+					handler(evt)
+				}
 			}
 		}
 	}()
 
 	return cancel, nil
+}
+
+func sleepOrCancel(ctx context.Context, stopCh chan struct{}, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-stopCh:
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
+func min(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // GetIntent fetches an IntentRecord PDA and decodes it.
@@ -251,6 +319,24 @@ func (c *SolanaClient) IsIntentSolvedOnChain2(ctx context.Context, srcChainID, s
 
 // BalanceOf returns the SPL token balance held by `account`'s associated
 // token account for `token`.
+// GetMintDecimals reads the SPL Token Mint account and returns its decimals
+// field. The mint account layout puts `decimals` at byte offset 44
+// (4 mintAuthorityFlag + 32 mintAuthority + 8 supply = 44). Equivalent to
+// what `spl-token display <mint>` shows. Used by the solver to compute
+// cross-decimal scaling factors so the bridged amount preserves the
+// user's intent across mints with different decimal precision.
+func (c *SolanaClient) GetMintDecimals(ctx context.Context, mint solana.PublicKey) (uint8, error) {
+	// rpcClient.GetTokenSupply parses the mint and returns decimals directly.
+	supply, err := c.rpcClient.GetTokenSupply(ctx, mint, c.commitment)
+	if err != nil {
+		return 0, fmt.Errorf("getTokenSupply(%s): %w", mint, err)
+	}
+	if supply == nil || supply.Value == nil {
+		return 0, fmt.Errorf("getTokenSupply(%s): nil response", mint)
+	}
+	return supply.Value.Decimals, nil
+}
+
 func (c *SolanaClient) BalanceOf(ctx context.Context, account, token ChainAddress) (*big.Int, error) {
 	if account.Kind != "solana" || token.Kind != "solana" {
 		return nil, &ErrUnsupported{Op: "BalanceOf", Kind: account.Kind + "/" + token.Kind}

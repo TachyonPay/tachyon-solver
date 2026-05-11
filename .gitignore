@@ -18,3 +18,18 @@ node_modules
 
 # Hardhat Ignition default folder for deployments against a local node
 ignition/deployments/chain-31337
+
+# Solana / Anchor build artifacts — regenerable via `anchor build`.
+# Includes the cargo build cache, IDL, BPF outputs, and incremental state.
+# DO NOT commit; keep `solana/target/deploy/bridge_intent-keypair.json`
+# (the program upgrade authority) backed up OUT-OF-REPO.
+solana/target/
+solana/.anchor/
+solana/test-ledger/
+
+# Solana keypair JSON files — these are 64-byte ed25519 SECRET KEYS.
+# NEVER commit. Each dev generates their own with `solana-keygen new`.
+**/solver-solana.json
+**/relayer-solana.json
+**/user-solana.json
+tachyon-prod/*-solana.json

@@ -1,6 +1,11 @@
 package rebalancer
 
-import "github.com/ethereum/go-ethereum/common"
+import (
+	"os"
+	"strings"
+
+	"github.com/ethereum/go-ethereum/common"
+)
 
 // LayerZero v2 endpoint IDs.
 const (
@@ -10,8 +15,10 @@ const (
 
 // Chain IDs (matches the env CHAIN_*_ID values).
 const (
-	ChainIDBase    = "8453"
-	ChainIDHorizen = "26514"
+	ChainIDBase           = "8453"
+	ChainIDHorizen        = "26514"
+	ChainIDBaseSepolia    = "84532"
+	ChainIDHorizenTestnet = "2651420"
 )
 
 // Base mainnet — verified addresses.
@@ -56,6 +63,11 @@ const (
 
 // TokenAddress returns the on-chain ERC20 address for (chainID, sym).
 // Returns common.Address{} if unsupported on that chain.
+//
+// Mainnet chains (Base 8453, Horizen 26514) use the hardcoded canonical
+// addresses. Testnet chains (Base Sepolia 84532, Horizen testnet 2651420)
+// fall back to the TOKEN_<SYM>_<CHAIN> env vars from .env (e.g.
+// TOKEN_USDC_BASE, TOKEN_USDC_HORIZEN).
 func TokenAddress(chainID string, sym TokenSym) common.Address {
 	switch chainID {
 	case ChainIDBase:
@@ -74,8 +86,24 @@ func TokenAddress(chainID string, sym TokenSym) common.Address {
 		case TokenZEN:
 			return HzZENOFT
 		}
+	case ChainIDBaseSepolia:
+		if v := envTokenAddr("TOKEN_" + string(sym) + "_BASE"); v != (common.Address{}) {
+			return v
+		}
+	case ChainIDHorizenTestnet:
+		if v := envTokenAddr("TOKEN_" + string(sym) + "_HORIZEN"); v != (common.Address{}) {
+			return v
+		}
 	}
 	return common.Address{}
+}
+
+func envTokenAddr(envVar string) common.Address {
+	v := strings.TrimSpace(os.Getenv(envVar))
+	if v == "" || !common.IsHexAddress(v) {
+		return common.Address{}
+	}
+	return common.HexToAddress(v)
 }
 
 // TokenDecimals returns the canonical decimals for sym, used as a static

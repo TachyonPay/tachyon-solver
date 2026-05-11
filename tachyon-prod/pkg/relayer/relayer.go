@@ -14,6 +14,7 @@ import (
 	ecies "github.com/ecies/go/v2"
 	"github.com/ethereum/go-ethereum/common"
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/gagliardetto/solana-go"
 	log "github.com/sirupsen/logrus"
 	"github.com/zk-tachyon/tachyon-prod/pkg/blockchain"
 	"github.com/zk-tachyon/tachyon-prod/pkg/config"
@@ -345,7 +346,19 @@ func (r *Relayer) GetRecipientsForWinner(ctx context.Context, intentID string, s
 
 	requesterAddress := common.HexToAddress(requesterAddr)
 
+	// If sourceChainID is a configured Solana chain, skip the EVM lookup
+	// entirely and go straight to the Solana fallback below. Without this
+	// short-circuit, the EVM iteration can falsely match an unrelated
+	// intent on Horizen/Base that happens to share the same ID, then
+	// burn time in a deposit-visibility retry loop that will never resolve.
+	sourceIsSolana := false
 	if sourceChainIDStr != "" {
+		if _, ok := r.solanaClients[sourceChainIDStr]; ok {
+			sourceIsSolana = true
+		}
+	}
+
+	if !sourceIsSolana && sourceChainIDStr != "" {
 		sourceChainIDBig, ok := new(big.Int).SetString(sourceChainIDStr, 10)
 		if ok {
 			// Find the network key for this chain ID
@@ -375,7 +388,7 @@ func (r *Relayer) GetRecipientsForWinner(ctx context.Context, intentID string, s
 		}
 	}
 
-	if intent == nil {
+	if !sourceIsSolana && intent == nil {
 		for networkKey, client := range r.clients {
 			tempIntent, err := client.GetIntent(ctx, intentIDBig)
 			if err == nil && tempIntent.User != "" {
@@ -408,7 +421,42 @@ func (r *Relayer) GetRecipientsForWinner(ctx context.Context, intentID string, s
 		}
 	}
 
+	// Solana-source fallback: when no EVM client matched, the intent may
+	// live on Solana. Verify the requester is the winning solver (a
+	// Solana ed25519 pubkey, base58-encoded). The requester header carries
+	// it verbatim — same X-Solver-Address used for EVM solvers.
 	if intent == nil {
+		for chainIDStr, sc := range r.solanaClients {
+			if sourceChainIDStr != "" && chainIDStr != sourceChainIDStr {
+				continue
+			}
+			snap, err := sc.GetIntent(ctx, intentIDBig)
+			if err != nil || snap == nil {
+				continue
+			}
+			if len(snap.WinningSolver.Bytes) != 32 {
+				continue
+			}
+			winningPubkey := solana.PublicKeyFromBytes(snap.WinningSolver.Bytes).String()
+			if winningPubkey == strings.TrimSpace(requesterAddr) {
+				log.WithFields(log.Fields{
+					"intentID":      intentID,
+					"sourceChainID": chainIDStr,
+					"winner":        winningPubkey,
+				}).Debug("Solana-source intent matched winning solver")
+				// Skip the EVM `deposit_visible` retry loop — Solana state is
+				// already final by the time the solver wins. Look up stored
+				// recipients directly. StoreRecipients keys as "<chainID>-<intentID>".
+				storeKey := fmt.Sprintf("%s-%s", chainIDStr, intentID)
+				r.mu.RLock()
+				info, ok := r.recipientStore[storeKey]
+				r.mu.RUnlock()
+				if !ok {
+					return nil, fmt.Errorf("recipients not found for solana-source intent %s (key=%s)", intentID, storeKey)
+				}
+				return info, nil
+			}
+		}
 		if intentErr != nil {
 			return nil, fmt.Errorf("failed to get intent from blockchain: %w", intentErr)
 		}

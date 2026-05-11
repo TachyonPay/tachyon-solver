@@ -345,6 +345,103 @@ type RegisterRecipientRequest struct {
 	Signature        string `json:"signature" binding:"required"` // Signature of "REGISTER_STEALTH:<address>" to prove ownership
 }
 
+// SolanaStealthRecord holds one (intent, salt) entry for a Solana recipient.
+// Salt can be either:
+//   - Persisted explicitly (legacy /store-salt flow — Salt field set, Nonce==0)
+//   - Re-derivable via HMAC(viewSecret, intentID || chainID || nonce-LE) when
+//     the new register + generate-salt flow was used (Salt field empty,
+//     Nonce set to the derivation index). The relayer recomputes Salt on
+//     each GetSolanaStealthSalts call and never persists it to disk.
+type SolanaStealthRecord struct {
+	IntentID   string `json:"intentId"`
+	ChainID    string `json:"chainId"`
+	Salt       string `json:"salt,omitempty"`  // hex 32 bytes (legacy path) or empty (derived path)
+	Nonce      uint64 `json:"nonce,omitempty"` // derivation index for HMAC path
+	StealthPDA string `json:"stealthPda"`      // base58 — convenience for FE
+	CreatedAt  int64  `json:"createdAt"`
+}
+
+// SolanaRecipientAccount mirrors EVM's RecipientAccount for Solana
+// ed25519 recipients. The single sensitive field is `ViewSecret` —
+// a 32-byte HMAC key that, combined with (intentID, chainID, nonce),
+// deterministically produces every per-intent salt. This matches the
+// EVM "one keypair per recipient, derive everything else" pattern.
+//
+// The Nonce field is the monotonic counter incremented on each
+// /generate-salt call. Records[] holds the metadata (intentID, chainID,
+// nonce, stealthPDA) needed to re-derive the salts later.
+type SolanaRecipientAccount struct {
+	RecipientPubkey string                `json:"recipientPubkey"` // base58 ed25519 pubkey
+	ViewSecret      string                `json:"viewSecret,omitempty"` // hex 32 bytes; empty for legacy-only accounts
+	Nonce           uint64                `json:"nonce"`           // next-to-use derivation index
+	Records         []SolanaStealthRecord `json:"records"`
+	CreatedAt       int64                 `json:"createdAt"`
+	UpdatedAt       int64                 `json:"updatedAt"`
+}
+
+// RegisterSolanaRecipientRequest registers a recipient and generates
+// their per-account viewSecret (sealed in a TEE deployment; plaintext
+// today). Idempotent — re-register returns the existing account.
+type RegisterSolanaRecipientRequest struct {
+	RecipientPubkey string `json:"recipientPubkey" binding:"required"`
+	Timestamp       int64  `json:"timestamp" binding:"required"`
+	Signature       string `json:"signature" binding:"required"` // hex ed25519 sig over "REGISTER_SOLANA_STEALTH:<pubkey>:<timestamp>"
+}
+
+type RegisterSolanaRecipientResponse struct {
+	Success         bool   `json:"success"`
+	RecipientPubkey string `json:"recipientPubkey,omitempty"`
+	AlreadyExists   bool   `json:"alreadyExists,omitempty"`
+	Error           string `json:"error,omitempty"`
+}
+
+// GenerateSolanaSaltRequest asks the relayer for the next deterministic
+// salt for (recipient, intentID, chainID). Unauthenticated, mirroring
+// the EVM /recipient/generate-stealth pattern (sender can ask on the
+// recipient's behalf; possession of the returned salt alone never
+// allows theft since sweep_stealth still requires recipient signature).
+type GenerateSolanaSaltRequest struct {
+	RecipientPubkey string `json:"recipientPubkey" binding:"required"`
+	IntentID        string `json:"intentId" binding:"required"`
+	ChainID         string `json:"chainId" binding:"required"`
+	ProgramID       string `json:"programId" binding:"required"` // base58 bridge_intent program ID for PDA derivation
+}
+
+type GenerateSolanaSaltResponse struct {
+	Success    bool   `json:"success"`
+	Salt       string `json:"salt,omitempty"`       // hex 32 bytes
+	Nonce      uint64 `json:"nonce,omitempty"`      // index used; debug/audit
+	StealthPDA string `json:"stealthPda,omitempty"` // base58, derived from ["stealth", recipient, salt]
+	Error      string `json:"error,omitempty"`
+}
+
+// StoreSolanaStealthRequest stores a salt for a recipient. No signature
+// required (the sender stores; leaking the salt only allows pattern
+// correlation, not theft — since sweep_stealth still requires the
+// recipient's signature). In production a sealed-box should be used.
+type StoreSolanaStealthRequest struct {
+	RecipientPubkey string `json:"recipientPubkey" binding:"required"`
+	IntentID        string `json:"intentId" binding:"required"`
+	ChainID         string `json:"chainId" binding:"required"`
+	Salt            string `json:"salt" binding:"required"`       // hex 32 bytes
+	StealthPDA      string `json:"stealthPda,omitempty"`          // base58, optional
+}
+
+// GetSolanaStealthSaltsRequest is auth'd by an ed25519 signature over
+// "GET_SOLANA_STEALTH:<recipientPubkey>:<timestamp>". The timestamp
+// prevents trivial replay.
+type GetSolanaStealthSaltsRequest struct {
+	RecipientPubkey string `json:"recipientPubkey" binding:"required"`
+	Timestamp       int64  `json:"timestamp" binding:"required"`
+	Signature       string `json:"signature" binding:"required"` // hex ed25519 sig
+}
+
+type GetSolanaStealthSaltsResponse struct {
+	Success bool                  `json:"success"`
+	Records []SolanaStealthRecord `json:"records,omitempty"`
+	Error   string                `json:"error,omitempty"`
+}
+
 // RegisterRecipientResponse returns the recipient's public keys and stealth addresses
 type RegisterRecipientResponse struct {
 	Success          bool             `json:"success"`
