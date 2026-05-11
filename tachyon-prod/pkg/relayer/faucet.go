@@ -2,7 +2,7 @@ package relayer
 
 import (
 	"context"
-	"encoding/binary"
+	"encoding/binary" // retained for checkCooldown (re-enable when cooldown is turned back on)
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -130,16 +130,13 @@ func (f *FaucetService) FaucetStatus(walletAddr string) (*FaucetStatusResult, er
 	if _, err := solana.PublicKeyFromBase58(walletAddr); err != nil {
 		return nil, fmt.Errorf("invalid wallet address: %w", err)
 	}
-	canClaim, nextAt := f.checkCooldown(walletAddr)
+	// Cooldown disabled — always claimable.
+	// canClaim, nextAt := f.checkCooldown(walletAddr)
 	res := &FaucetStatusResult{
-		CanClaim:        canClaim,
-		CooldownSeconds: int(f.cooldown.Seconds()),
+		CanClaim:        true,
+		CooldownSeconds: 0,
 		TokenMint:       f.mintPub.String(),
 		AmountRaw:       f.amountRaw,
-	}
-	if !canClaim && !nextAt.IsZero() {
-		t := nextAt.Unix()
-		res.NextClaimAt = &t
 	}
 	return res, nil
 }
@@ -155,10 +152,11 @@ func (f *FaucetService) FaucetClaim(ctx context.Context, walletAddr string) (*Fa
 		return nil, fmt.Errorf("invalid wallet address: %w", err)
 	}
 
-	canClaim, nextAt := f.checkCooldown(walletAddr)
-	if !canClaim {
-		return nil, fmt.Errorf("rate limited: next claim available at %s UTC", nextAt.UTC().Format(time.RFC3339))
-	}
+	// Cooldown disabled — any wallet can claim any number of times.
+	// canClaim, nextAt := f.checkCooldown(walletAddr)
+	// if !canClaim {
+	// 	return nil, fmt.Errorf("rate limited: next claim available at %s UTC", nextAt.UTC().Format(time.RFC3339))
+	// }
 
 	ata, _, err := solana.FindAssociatedTokenAddress(recipient, f.mintPub)
 	if err != nil {
@@ -186,12 +184,12 @@ func (f *FaucetService) FaucetClaim(ctx context.Context, walletAddr string) (*Fa
 		return nil, fmt.Errorf("send faucet tx: %w", err)
 	}
 
-	// Persist claim timestamp so the cooldown survives relayer restarts.
-	ts := make([]byte, 8)
-	binary.BigEndian.PutUint64(ts, uint64(time.Now().Unix()))
-	if storeErr := f.store.Put(faucetStoreKey(walletAddr), ts); storeErr != nil {
-		log.WithError(storeErr).Warn("Faucet: failed to persist claim timestamp")
-	}
+	// Cooldown disabled — skip persisting claim timestamp.
+	// ts := make([]byte, 8)
+	// binary.BigEndian.PutUint64(ts, uint64(time.Now().Unix()))
+	// if storeErr := f.store.Put(faucetStoreKey(walletAddr), ts); storeErr != nil {
+	// 	log.WithError(storeErr).Warn("Faucet: failed to persist claim timestamp")
+	// }
 
 	log.WithFields(log.Fields{
 		"wallet":    walletAddr,

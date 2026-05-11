@@ -217,14 +217,15 @@ func TestFaucetStatus_CanClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FaucetStatus error: %v", err)
 	}
+	// Cooldown disabled — always claimable.
 	if !res.CanClaim {
-		t.Error("expected CanClaim=true for fresh wallet")
+		t.Error("expected CanClaim=true (cooldown disabled)")
 	}
 	if res.NextClaimAt != nil {
-		t.Error("expected NextClaimAt to be nil when CanClaim=true")
+		t.Error("expected NextClaimAt=nil (cooldown disabled)")
 	}
-	if res.CooldownSeconds != int((24 * time.Hour).Seconds()) {
-		t.Errorf("CooldownSeconds = %d, want %d", res.CooldownSeconds, int((24*time.Hour).Seconds()))
+	if res.CooldownSeconds != 0 {
+		t.Errorf("CooldownSeconds = %d, want 0 (cooldown disabled)", res.CooldownSeconds)
 	}
 	if res.AmountRaw != f.amountRaw {
 		t.Errorf("AmountRaw = %d, want %d", res.AmountRaw, f.amountRaw)
@@ -244,16 +245,9 @@ func TestFaucetStatus_OnCooldown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FaucetStatus error: %v", err)
 	}
-	if res.CanClaim {
-		t.Error("expected CanClaim=false while on cooldown")
-	}
-	if res.NextClaimAt == nil {
-		t.Error("expected NextClaimAt to be set while on cooldown")
-	} else {
-		nextAt := time.Unix(*res.NextClaimAt, 0)
-		if time.Until(nextAt) < 21*time.Hour {
-			t.Errorf("NextClaimAt too soon: %s", nextAt)
-		}
+	// Cooldown disabled — still returns canClaim=true regardless of stored timestamp.
+	if !res.CanClaim {
+		t.Error("expected CanClaim=true (cooldown disabled, stored timestamp is ignored)")
 	}
 }
 
@@ -268,22 +262,7 @@ func TestFaucetStatus_InvalidWallet(t *testing.T) {
 
 // --- FaucetClaim (rate-limiter path, no RPC) ---------------------------------
 
-func TestFaucetClaim_RateLimited(t *testing.T) {
-	f := makeFaucet(t, 24*time.Hour)
-	wallet := solana.NewWallet().PublicKey().String()
-
-	// Simulate a recent claim so the wallet is on cooldown.
-	writeClaimAt(t, f, wallet, time.Now().Add(-30*time.Minute))
-
-	_, err := f.FaucetClaim(context.Background(), wallet)
-	if err == nil {
-		t.Fatal("expected rate-limit error, got nil")
-	}
-	// Error message should tell the user when they can try again.
-	if !containsStr(err.Error(), "rate limited") {
-		t.Errorf("expected 'rate limited' in error, got: %v", err)
-	}
-}
+// TestFaucetClaim_RateLimited is intentionally removed — cooldown is disabled.
 
 func TestFaucetClaim_InvalidWallet(t *testing.T) {
 	f := makeFaucet(t, 24*time.Hour)
