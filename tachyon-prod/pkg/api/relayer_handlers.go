@@ -42,6 +42,7 @@ func (api *RelayerAPI) RegisterRoutes(r *gin.Engine) {
 	// Stealth address / recipient endpoints
 	r.POST("/recipient/register", api.RegisterRecipient)
 	r.GET("/recipient/addresses", api.GetStealthAddresses)
+	r.POST("/recipient/get-stealth-addresses", api.GetStealthAddresses) // FE alias
 	r.POST("/recipient/generate-stealth", api.GenerateStealthAddress)
 	r.POST("/recipient/derive-stealth-key", api.DeriveStealthKey)
 	r.POST("/recipient/deploy-safe", api.DeploySafe)
@@ -329,15 +330,32 @@ func (api *RelayerAPI) RegisterRecipient(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-// GetStealthAddresses returns all stealth addresses for a recipient
+// GetStealthAddresses returns all stealth addresses for a recipient.
+// Accepts address+signature as query params (GET) or JSON body (POST).
 func (api *RelayerAPI) GetStealthAddresses(c *gin.Context) {
 	address := c.Query("address")
 	signature := c.Query("signature")
 
+	// Fall back to JSON body for POST callers.
+	if address == "" || signature == "" {
+		var body struct {
+			Address   string `json:"address"`
+			Signature string `json:"signature"`
+		}
+		if err := c.ShouldBindJSON(&body); err == nil {
+			if address == "" {
+				address = body.Address
+			}
+			if signature == "" {
+				signature = body.Signature
+			}
+		}
+	}
+
 	if address == "" || signature == "" {
 		c.JSON(http.StatusBadRequest, types.GetStealthAddressesResponse{
 			Success: false,
-			Error:   "address and signature query parameters required",
+			Error:   "address and signature required (query params or JSON body)",
 		})
 		return
 	}
