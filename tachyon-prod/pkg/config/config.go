@@ -16,10 +16,25 @@ import (
 	"github.com/zk-tachyon/tachyon-prod/pkg/types"
 )
 
+// FaucetConfig holds configuration for the SPL token faucet endpoint.
+// It is optional; when absent the /solana/faucet/* routes are not registered.
+type FaucetConfig struct {
+	Enabled       bool
+	TokenMint     string
+	TokenDecimals uint8
+	AmountRaw     uint64 // 100 * 10^TokenDecimals (computed at load time)
+	CooldownHours int
+	MintAuthKey   string // raw value from env: JSON byte array or base58
+	RPCURL        string // Solana RPC URL to use for faucet transactions
+}
+
 // Config holds all application configuration
 type Config struct {
 	// Chain configurations - key is chain ID as string
 	Chains map[string]types.NetworkConfig
+
+	// FaucetConfig is non-nil when FAUCET_SOLANA_PRIVATE_KEY is set.
+	FaucetConfig *FaucetConfig
 
 	// Solver configuration
 	SolverConfig types.SolverConfig
@@ -282,6 +297,47 @@ func LoadConfig() (*Config, error) {
 		privKey := ecies.NewPrivateKeyFromBytes(privKeyBytes)
 		cfg.ECIESPrivateKey = privKey
 		cfg.ECIESPublicKey = privKey.PublicKey
+	}
+
+	// Optional SPL token faucet — enabled when FAUCET_SOLANA_PRIVATE_KEY is set.
+	if faucetKey := os.Getenv("FAUCET_SOLANA_PRIVATE_KEY"); faucetKey != "" {
+		tokenMint := getEnv("FAUCET_TOKEN_MINT", "CLQdHANA2Z2tjka21NqBkzoytaH18JtA2Q56Bt4tHPj")
+		decimalsU, err := strconv.ParseUint(getEnv("FAUCET_TOKEN_DECIMALS", "6"), 10, 8)
+		if err != nil {
+			return nil, fmt.Errorf("invalid FAUCET_TOKEN_DECIMALS: %w", err)
+		}
+		decimals := uint8(decimalsU)
+		cooldown, _ := strconv.Atoi(getEnv("FAUCET_COOLDOWN_HOURS", "24"))
+		if cooldown <= 0 {
+			cooldown = 24
+		}
+
+		// Compute raw amount: 100 tokens * 10^decimals
+		amountRaw := uint64(100)
+		for i := uint8(0); i < decimals; i++ {
+			amountRaw *= 10
+		}
+
+		// Resolve RPC URL: explicit override → first configured Solana chain → empty (will error at startup)
+		rpcURL := getEnv("FAUCET_SOLANA_RPC_URL", "")
+		if rpcURL == "" {
+			for _, c := range cfg.Chains {
+				if c.IsSolana() {
+					rpcURL = c.RpcURL
+					break
+				}
+			}
+		}
+
+		cfg.FaucetConfig = &FaucetConfig{
+			Enabled:       true,
+			TokenMint:     tokenMint,
+			TokenDecimals: decimals,
+			AmountRaw:     amountRaw,
+			CooldownHours: cooldown,
+			MintAuthKey:   faucetKey,
+			RPCURL:        rpcURL,
+		}
 	}
 
 	return cfg, nil

@@ -47,6 +47,10 @@ func (api *RelayerAPI) RegisterSolanaRoutes(r *gin.Engine) {
 		g.POST("/recipient/store-salt", api.SolanaStoreStealthSalt)
 		g.POST("/recipient/get-salts", api.SolanaGetStealthSalts)
 	}
+
+	// Faucet routes are independent of chain config — they only require
+	// FAUCET_SOLANA_PRIVATE_KEY to be set.
+	api.RegisterFaucetRoutes(r)
 }
 
 // SolanaRegisterRecipient initializes a recipient's account at the

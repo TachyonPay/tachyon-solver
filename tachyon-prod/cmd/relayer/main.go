@@ -76,9 +76,16 @@ func main() {
 		}
 	}
 	if hasSolana {
-		relayerAPI.RegisterSolanaRoutes(router)
+		relayerAPI.RegisterSolanaRoutes(router) // also calls RegisterFaucetRoutes internally
 		relayerAPI.RegisterSolanaReadRoutes(router)
 		log.Info("Solana endpoints enabled at /solana/*")
+	} else if relayerInstance.HasFaucet() {
+		// Faucet configured without a full Solana chain — register only the
+		// faucet routes so callers can still reach /solana/faucet/*.
+		relayerAPI.RegisterFaucetRoutes(router)
+	}
+	if relayerInstance.HasFaucet() {
+		log.Info("SPL token faucet enabled at /solana/faucet/*")
 	}
 
 	// Register admin routes with API key auth

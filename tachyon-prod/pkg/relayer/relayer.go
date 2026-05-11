@@ -39,6 +39,9 @@ type Relayer struct {
 	registeredSolvers map[string]*types.SolverInfo
 	mu               sync.RWMutex
 	txMutexes        map[string]*sync.Mutex
+
+	// faucet is non-nil when FAUCET_SOLANA_PRIVATE_KEY is configured.
+	faucet *FaucetService
 }
 
 // solverKey forms the in-memory map key for a solver registration.
@@ -139,9 +142,38 @@ func NewRelayer(cfg *config.Config) (*Relayer, error) {
 		log.WithError(err).Warn("Failed to load persisted data, starting fresh")
 	}
 
+	// Initialize optional faucet service.
+	if cfg.FaucetConfig != nil && cfg.FaucetConfig.Enabled {
+		faucet, err := newFaucetService(cfg.FaucetConfig, store)
+		if err != nil {
+			log.WithError(err).Warn("Faucet service disabled due to initialization error")
+		} else {
+			relayer.faucet = faucet
+		}
+	}
+
 	log.WithField("dbPath", dbPath).Info("Relayer initialized with persistent storage")
 
 	return relayer, nil
+}
+
+// HasFaucet reports whether the faucet service is active.
+func (r *Relayer) HasFaucet() bool { return r.faucet != nil }
+
+// FaucetClaim delegates to the FaucetService.
+func (r *Relayer) FaucetClaim(ctx context.Context, walletAddr string) (*FaucetClaimResult, error) {
+	if r.faucet == nil {
+		return nil, fmt.Errorf("faucet not configured")
+	}
+	return r.faucet.FaucetClaim(ctx, walletAddr)
+}
+
+// FaucetStatus delegates to the FaucetService.
+func (r *Relayer) FaucetStatus(walletAddr string) (*FaucetStatusResult, error) {
+	if r.faucet == nil {
+		return nil, fmt.Errorf("faucet not configured")
+	}
+	return r.faucet.FaucetStatus(walletAddr)
 }
 
 // loadPersistedData loads previously saved data from the database
