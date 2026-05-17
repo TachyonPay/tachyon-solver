@@ -209,6 +209,20 @@ func (s *Solver) Start() error {
 	}
 
 	for networkKey := range s.cfg.Chains {
+		client, ok := s.clients[networkKey]
+		if !ok {
+			continue
+		}
+		// Skip chains that don't have a Tachyon Bridge contract deployed —
+		// CHAIN_*_BRIDGE is intentionally empty for chains we only use for
+		// privacy-router deposit forwarding / Safe execTx batching (MegaETH,
+		// Eth, Arb, Op today). Polling eth_blockNumber + eth_getLogs every
+		// 5s against the zero address burns ~4M RPC calls/month per skipped
+		// chain on the operator's Alchemy quota.
+		if !client.HasBridgeContract() {
+			log.WithField("network", networkKey).Info("Skipping event polling — no Tachyon Bridge configured for this chain")
+			continue
+		}
 		go s.pollEvents(networkKey)
 	}
 

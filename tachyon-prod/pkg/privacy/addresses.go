@@ -63,7 +63,8 @@ const (
 	TokenUSDC  Token = "USDC"
 	TokenUSDCe Token = "USDC.e" // bridged USDC variant — Horizen uses this
 	TokenETH   Token = "ETH"
-	TokenZEN   Token = "ZEN" // Horizen's native, also lives as ERC-20 on Base via OFT
+	TokenZEN   Token = "ZEN"  // Horizen's native, also lives as ERC-20 on Base via OFT
+	TokenUSDM  Token = "USDM" // MegaUSD — MegaETH stable, also deployed on Ethereum; 18 decimals
 )
 
 // LifiNativeSentinel is the address LI.FI (and most aggregators) use
@@ -82,9 +83,11 @@ var LifiNativeSentinel = common.HexToAddress("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeee
 var (
 	MegaETHUSDT0 = common.HexToAddress("0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb")
 	MegaETHWETH  = common.HexToAddress("0x4200000000000000000000000000000000000006")
+	MegaETHUSDM  = common.HexToAddress("0xFAfDdbb3FC7688494971a79cc65DCa3EF82079E7")
 
 	BaseUSDC     = common.HexToAddress("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")
 	EthereumUSDC = common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+	EthereumUSDM = common.HexToAddress("0xEc2AF1C8B110a61fD9C3Fa6a554a031Ca9943926")
 	ArbitrumUSDC = common.HexToAddress("0xaf88d065e77c8cC2239327C5EDb3A432268e5831")
 	OptimismUSDC = common.HexToAddress("0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85")
 
@@ -127,8 +130,11 @@ func TokenAddress(chainID string, t Token) common.Address {
 	}
 	switch chainID {
 	case ChainIDMegaETH:
-		if t == TokenUSDT0 {
+		switch t {
+		case TokenUSDT0:
 			return MegaETHUSDT0
+		case TokenUSDM:
+			return MegaETHUSDM
 		}
 	case ChainIDHorizen:
 		switch t {
@@ -145,8 +151,11 @@ func TokenAddress(chainID string, t Token) common.Address {
 			return BaseZEN
 		}
 	case ChainIDEthereum:
-		if t == TokenUSDC {
+		switch t {
+		case TokenUSDC:
 			return EthereumUSDC
+		case TokenUSDM:
+			return EthereumUSDM
 		}
 	case ChainIDArbitrum:
 		if t == TokenUSDC {
@@ -301,6 +310,8 @@ func NormalizeToken(s string) Token {
 		return TokenETH
 	case "ZEN":
 		return TokenZEN
+	case "USDM":
+		return TokenUSDM
 	}
 	return Token(s)
 }
@@ -310,7 +321,7 @@ func TokenDecimals(t Token) uint8 {
 	switch t {
 	case TokenUSDT0, TokenUSDC, TokenUSDCe:
 		return 6
-	case TokenETH, TokenZEN:
+	case TokenETH, TokenZEN, TokenUSDM:
 		return 18
 	}
 	return 18
@@ -388,6 +399,16 @@ func LifiSupportedRoutes() []RouteSpec {
 	for _, ch := range []string{ChainIDBase, ChainIDArbitrum, ChainIDOptimism} {
 		out = append(out, RouteSpec{ChainIDMegaETH, TokenUSDT0, ch, TokenETH})
 	}
+	// USDm (MegaUSD) — verified live on li.quest 2026-05-12. Same MegaETH-
+	// bridge pattern as USDT0 but a different stable; bigger market cap
+	// ($341M vs USDT0). Inbound from USDC@{Base,Eth,Arb,Opt}, outbound back
+	// to USDC on the same set, plus same-asset Eth↔MegaETH.
+	for _, ch := range []string{ChainIDBase, ChainIDEthereum, ChainIDArbitrum, ChainIDOptimism} {
+		out = append(out, RouteSpec{ch, TokenUSDC, ChainIDMegaETH, TokenUSDM})
+		out = append(out, RouteSpec{ChainIDMegaETH, TokenUSDM, ch, TokenUSDC})
+	}
+	out = append(out, RouteSpec{ChainIDEthereum, TokenUSDM, ChainIDMegaETH, TokenUSDM})
+	out = append(out, RouteSpec{ChainIDMegaETH, TokenUSDM, ChainIDEthereum, TokenUSDM})
 	return out
 }
 

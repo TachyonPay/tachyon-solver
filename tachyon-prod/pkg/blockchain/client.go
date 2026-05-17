@@ -114,6 +114,15 @@ func (c *Client) GetSafeAddress() common.Address {
 	return c.safeAddress
 }
 
+// HasBridgeContract reports whether this client has a non-zero Tachyon
+// Bridge contract address. Chains in the .env that only carry RPC + Safe
+// config (e.g. MegaETH, Eth, Arb, Op for the privacy-router's deposit
+// watcher) leave CHAIN_*_BRIDGE empty; the solver should not waste
+// eth_blockNumber + eth_getLogs every 5s polling a zero address on those.
+func (c *Client) HasBridgeContract() bool {
+	return c.contractAddr != (common.Address{})
+}
+
 // SuggestGasPrice exposes the underlying eth_gasPrice estimate so ops
 // scripts can build their own bumped fee strategies without going
 // through getTransactOpts.
