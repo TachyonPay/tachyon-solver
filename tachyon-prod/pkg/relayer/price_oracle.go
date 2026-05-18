@@ -86,6 +86,10 @@ var symbolAliases = map[string]string{
 	// BTC variants
 	"WBTC":  "BTC",
 	"CBBTC": "BTC",
+
+	// Testnet deployment tokens — priced at USDC rate ($1.00)
+	"HZNA":  "USDC", // Horizen testnet token (deployment scripts)
+	"BASEA": "USDC", // Base testnet token (deployment scripts)
 }
 
 // FetchConsensusPrice queries up to four APIs in parallel and returns the median

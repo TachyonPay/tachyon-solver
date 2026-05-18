@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:strkbtc.starknet.io)",
+      "Bash(grep -E \"^HZNA$|^BASEA$|HZNA|BASEA\")"
+    ]
+  }
+}
