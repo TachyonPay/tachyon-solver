@@ -591,8 +591,21 @@ func (b *Bridger) sendAori(ctx context.Context, intent *BridgeIntent) (string, e
 	}).Info("Privacy bridge (Aori): TEE→EOA transfer mined")
 
 	// Step 2: ensure relayer EOA has Aori-contract allowance for srcToken.
-	if err := b.ensureEOAAllowance(ctx, src, srcTokenAddr, aoriContract, intent.Amount); err != nil {
+	// If a fresh approve was submitted, sleep briefly to let Aori's API
+	// RPC nodes catch up on the new allowance — eventual consistency
+	// between our RPC and theirs causes "insufficient user allowance"
+	// rejections in /swap if we hit the API < ~5s after the approve mines.
+	approveSubmitted, err := b.ensureEOAAllowance(ctx, src, srcTokenAddr, aoriContract, intent.Amount)
+	if err != nil {
 		return "", fmt.Errorf("EOA approve aori: %w", err)
+	}
+	if approveSubmitted {
+		log.WithField("sessionID", intent.SessionID).Info("Privacy bridge (Aori): waiting 10s for allowance propagation before /swap")
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(10 * time.Second):
+		}
 	}
 
 	// Step 3: get Aori quote.
@@ -621,9 +634,35 @@ func (b *Bridger) sendAori(ctx context.Context, intent *BridgeIntent) (string, e
 		return "", fmt.Errorf("sign aori order: %w", err)
 	}
 
-	// Step 5: submit /swap.
-	if err := b.aori.Swap(ctx, quote.OrderHash, sig); err != nil {
-		return "", fmt.Errorf("aori swap: %w", err)
+	// Step 5: submit /swap. Aori's API runs its own allowance pre-flight
+	// via whatever RPC node they happen to use, which may lag behind the
+	// approve we just landed. Retry on "insufficient user allowance" with
+	// backoff to absorb that propagation gap. Any other 4xx is treated as
+	// terminal (bad signature, bad order, etc.).
+	const aoriSwapRetries = 5
+	const aoriSwapBackoff = 6 * time.Second
+	var swapErr error
+	for attempt := 0; attempt < aoriSwapRetries; attempt++ {
+		swapErr = b.aori.Swap(ctx, quote.OrderHash, sig)
+		if swapErr == nil {
+			break
+		}
+		if !strings.Contains(swapErr.Error(), "insufficient user allowance") {
+			return "", fmt.Errorf("aori swap: %w", swapErr)
+		}
+		log.WithError(swapErr).WithFields(log.Fields{
+			"sessionID": intent.SessionID,
+			"attempt":   attempt + 1,
+			"max":       aoriSwapRetries,
+		}).Warn("Aori /swap reports insufficient allowance, retrying — propagation delay")
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(aoriSwapBackoff):
+		}
+	}
+	if swapErr != nil {
+		return "", fmt.Errorf("aori swap (after %d attempts): %w", aoriSwapRetries, swapErr)
 	}
 	log.WithFields(log.Fields{
 		"sessionID": intent.SessionID,
@@ -678,14 +717,18 @@ func encodeERC20Transfer(to common.Address, amount *big.Int) []byte {
 // on `chainID`. If insufficient for `amount`, submits an EOA approve tx
 // with max-uint256 so future bridges on this chain are no-ops. Idempotent
 // across restarts (reads the live allowance every call).
-func (b *Bridger) ensureEOAAllowance(ctx context.Context, chainID string, token, spender common.Address, amount *big.Int) error {
+//
+// Returns (submitted, error) where submitted=true iff a fresh approve tx
+// was actually broadcast. Callers use this to apply propagation delays
+// before downstream API calls that re-read the allowance.
+func (b *Bridger) ensureEOAAllowance(ctx context.Context, chainID string, token, spender common.Address, amount *big.Int) (bool, error) {
 	relayerEOA := crypto.PubkeyToAddress(b.eoaPrivKey.PublicKey)
 	current, err := b.allowanceOf(ctx, chainID, token, relayerEOA, spender)
 	if err != nil {
-		return fmt.Errorf("read EOA allowance: %w", err)
+		return false, fmt.Errorf("read EOA allowance: %w", err)
 	}
 	if current.Cmp(amount) >= 0 {
-		return nil
+		return false, nil
 	}
 	maxApprove := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
 	// approve(address,uint256) selector = 0x095ea7b3
@@ -695,7 +738,7 @@ func (b *Bridger) ensureEOAAllowance(ctx context.Context, chainID string, token,
 
 	tx, _, err := b.sendEOATx(ctx, chainID, token, big.NewInt(0), data, 100_000, 2*time.Minute)
 	if err != nil {
-		return fmt.Errorf("EOA approve tx: %w", err)
+		return false, fmt.Errorf("EOA approve tx: %w", err)
 	}
 	log.WithFields(log.Fields{
 		"chain":   chainID,
@@ -703,7 +746,7 @@ func (b *Bridger) ensureEOAAllowance(ctx context.Context, chainID string, token,
 		"spender": spender.Hex(),
 		"txHash":  tx.Hash().Hex(),
 	}).Info("Privacy bridge (Aori): EOA approve submitted (max-uint, one-time per chain)")
-	return nil
+	return true, nil
 }
 
 // sendEOATx submits an EIP-1559 tx from the relayer EOA on chainID and
