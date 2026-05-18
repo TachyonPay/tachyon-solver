@@ -447,6 +447,32 @@ func (p *Processor) waitForDelivery(ctx context.Context, intent *BridgeIntent) {
 		return
 	}
 
+	// Aori routes: sendAori is synchronous and only returns after Aori's
+	// /data/query reports status=completed. By the time we get here, the
+	// dst-side delivery tx has already mined and intent.BridgeTxHash holds
+	// the MegaETH-side fill tx (Aori's DstTx). Just record it as the
+	// delivery tx and transition to StatusDelivered immediately — no
+	// polling needed.
+	if IsAoriRoute(intent.SourceChainID, intent.DestChainID, intent.SourceToken, intent.DestToken) {
+		if intent.BridgeTxHash != "" {
+			_ = p.store.SetTxHash(intent.SessionID, "delivered", intent.BridgeTxHash)
+		}
+		if err := p.store.ChangeStatus(intent.SessionID, StatusBridging, StatusDelivered); err != nil {
+			log.WithError(err).WithField("sessionID", intent.SessionID).Warn("ChangeStatus to delivered failed (aori)")
+		}
+		log.WithFields(log.Fields{
+			"sessionID":  intent.SessionID,
+			"dstChain":   intent.DestChainID,
+			"deliveryTx": intent.BridgeTxHash,
+		}).Info("Privacy bridge (Aori) delivery confirmed")
+		if fresh, err := p.store.Get(intent.SessionID); err == nil && fresh != nil {
+			PublishDelivered(p.cfg, fresh)
+		} else {
+			PublishDelivered(p.cfg, intent)
+		}
+		return
+	}
+
 	deadline := time.Now().Add(20 * time.Minute)
 	tick := time.NewTicker(10 * time.Second)
 	defer tick.Stop()
