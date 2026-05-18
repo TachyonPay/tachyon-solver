@@ -9,8 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	log "github.com/sirupsen/logrus"
 	"github.com/zk-tachyon/tachyon-prod/pkg/blockchain"
@@ -33,6 +36,19 @@ type Bridger struct {
 	cfg    *Config
 	signer *rebalancer.SafeSigner
 	lifi   *LiFiClient
+	aori   *AoriClient
+
+	// clients are per-chain blockchain.Client instances. Reused by the
+	// Aori path for EOA-side operations (approve from relayer EOA on
+	// the source chain) — the SafeSigner only exposes Safe-side ops.
+	clients map[string]*blockchain.Client
+
+	// eoaPrivKey is the relayer EOA's secp256k1 private key. Used by
+	// the Aori path to sign signingHash and to sign approve txs from
+	// the EOA on each source chain. Same key as PRIVATE_KEY env that
+	// the relayer/solver use; loaded here so the privacy router can
+	// act as Aori offerer for these 4 corridors.
+	eoaPrivKey *ecdsa.PrivateKey
 
 	slippagePct float64
 }
@@ -54,6 +70,10 @@ func NewBridger(cfg *Config) (*Bridger, error) {
 	pkHex := strings.TrimPrefix(os.Getenv("PRIVATE_KEY"), "0x")
 	if pkHex == "" {
 		return nil, fmt.Errorf("PRIVATE_KEY must be set (used to derive an EOA address; signing still happens via SAFE_SIGNER_KEY_*)")
+	}
+	eoaPrivKey, err := crypto.HexToECDSA(pkHex)
+	if err != nil {
+		return nil, fmt.Errorf("PRIVATE_KEY parse: %w", err)
 	}
 
 	clients := map[string]*blockchain.Client{}
@@ -78,27 +98,34 @@ func NewBridger(cfg *Config) (*Bridger, error) {
 	if signer == nil {
 		return nil, fmt.Errorf("no chains configured with TEE Safe addresses")
 	}
-	log.WithField("chains", len(clients)).Info("Privacy bridger ready (LI.FI)")
+	log.WithField("chains", len(clients)).Info("Privacy bridger ready (LI.FI + Stargate + Aori)")
 
 	return &Bridger{
 		cfg:         cfg,
 		signer:      signer,
 		lifi:        NewLiFiClient(cfg.LifiAPIKey),
+		aori:        NewAoriClient(),
+		clients:     clients,
+		eoaPrivKey:  eoaPrivKey,
 		slippagePct: 0.01, // 1% default slippage
 	}, nil
 }
 
 // Send fulfils a single BridgeIntent. Returns the source-chain tx hash
-// once the TEE Safe execTransaction is mined. Delivery confirmation is
-// the caller's responsibility (Processor.waitForDelivery polls /status).
+// once the relevant on-chain submission is mined. Delivery confirmation
+// is the caller's responsibility (Processor.waitForDelivery polls the
+// per-bridge status endpoint).
 //
-// Routes are dispatched to one of two bridges based on the route table
-// in addresses.go:
+// Routes dispatch to one of three bridges, with priority:
 //   - IsStargateRoute (Horizen-touching, USDC.e ↔ USDC) → sendStargate
-//   - IsLifiRoute (MegaETH-touching, USDC/USDT0/ETH)     → sendLifi
+//   - IsAoriRoute (USDC@{Base,Eth,Arb,Op} → USDM@MegaETH) → sendAori
+//   - IsLifiRoute (anything else with both tokens known) → sendLifi
 func (b *Bridger) Send(ctx context.Context, intent *BridgeIntent) (string, error) {
 	if IsStargateRoute(intent.SourceChainID, intent.DestChainID, intent.SourceToken, intent.DestToken) {
 		return b.sendStargate(ctx, intent)
+	}
+	if IsAoriRoute(intent.SourceChainID, intent.DestChainID, intent.SourceToken, intent.DestToken) {
+		return b.sendAori(ctx, intent)
 	}
 	return b.sendLifi(ctx, intent)
 }
@@ -480,6 +507,269 @@ func decodeHexUint(s string) (*big.Int, error) {
 		return nil, fmt.Errorf("not a valid integer: %q", s)
 	}
 	return v, nil
+}
+
+// ---------------------------------------------------------------------------
+// Aori path
+// ---------------------------------------------------------------------------
+
+// sendAori dispatches an inbound USDC→USDM corridor via Aori's solver
+// network. Flow (all server-side, no user signing beyond initial deposit):
+//
+//  1. Source-chain: ERC20.transfer USDC from TEE Safe → relayer EOA
+//     (Safe execTx). User funds briefly pass through the EOA so it can
+//     act as Aori's offerer.
+//  2. Source-chain: relayer EOA approves the Aori contract for USDC if
+//     allowance is insufficient (EOA-side tx, sticky max-uint after the
+//     first run on a given chain).
+//  3. Aori HTTP: POST /quote with offerer=relayer EOA, recipient=stealth
+//     Safe on MegaETH. Aori returns orderHash + signingHash.
+//  4. Sign signingHash with relayer EOA private key (raw secp256k1).
+//  5. Aori HTTP: POST /swap with orderHash + signature. Aori's solver
+//     network picks up the order, pulls USDC from the relayer EOA on
+//     source, delivers USDM atomically to the stealth Safe on MegaETH.
+//  6. Poll /data/status until "filled" (or fall back to checking the
+//     stealth Safe's USDM balance on MegaETH).
+//
+// Returns Aori's fill tx hash on the destination chain (or empty if
+// the status endpoint doesn't surface it).
+func (b *Bridger) sendAori(ctx context.Context, intent *BridgeIntent) (string, error) {
+	src := intent.SourceChainID
+	cc, ok := b.cfg.Chains[src]
+	if !ok {
+		return "", fmt.Errorf("source chain %s not configured", src)
+	}
+
+	srcTokenAddr := TokenAddress(src, intent.SourceToken)
+	dstTokenAddr := TokenAddress(intent.DestChainID, intent.DestToken)
+	if srcTokenAddr == (common.Address{}) || dstTokenAddr == (common.Address{}) {
+		return "", fmt.Errorf("unresolved token address for Aori route %s:%s → %s:%s",
+			src, intent.SourceToken, intent.DestChainID, intent.DestToken)
+	}
+
+	aoriContract := AoriContractAddress(src)
+	if aoriContract == (common.Address{}) {
+		return "", fmt.Errorf("no Aori contract on chain %s", src)
+	}
+	srcChainKey := AoriChainKey(src)
+	dstChainKey := AoriChainKey(intent.DestChainID)
+	if srcChainKey == "" || dstChainKey == "" {
+		return "", fmt.Errorf("Aori chain-key missing for %s → %s", src, intent.DestChainID)
+	}
+
+	dstStealth := common.HexToAddress(intent.DestStealthSafe)
+	teeSafe := cc.TEESafe
+	relayerEOA := crypto.PubkeyToAddress(b.eoaPrivKey.PublicKey)
+
+	log.WithFields(log.Fields{
+		"sessionID":   intent.SessionID,
+		"src":         src,
+		"dst":         intent.DestChainID,
+		"srcToken":    intent.SourceToken,
+		"dstToken":    intent.DestToken,
+		"amount":      intent.Amount.String(),
+		"fromSafe":    teeSafe.Hex(),
+		"viaEOA":      relayerEOA.Hex(),
+		"toRecipient": dstStealth.Hex(),
+	}).Info("Privacy bridge (Aori): starting")
+
+	// Step 1: TEE Safe → relayer EOA transfer (Safe execTx).
+	transferData := encodeERC20Transfer(relayerEOA, intent.Amount)
+	preNonce, _ := b.readSafeNonce(ctx, src)
+	transferTx, _, err := b.signer.SendAndWait(ctx, src, srcTokenAddr, big.NewInt(0), transferData, 100_000, 2*time.Minute)
+	if err != nil {
+		return "", fmt.Errorf("Safe→EOA transfer: %w", err)
+	}
+	// Wait for the chain's Safe-nonce read to actually advance — needed
+	// in case downstream paths (rare) also touch the TEE Safe.
+	if preNonce != nil {
+		_ = b.waitNonceAdvance(ctx, src, preNonce, 30*time.Second)
+	}
+	log.WithFields(log.Fields{
+		"sessionID": intent.SessionID,
+		"txHash":    transferTx.Hash().Hex(),
+	}).Info("Privacy bridge (Aori): TEE→EOA transfer mined")
+
+	// Step 2: ensure relayer EOA has Aori-contract allowance for srcToken.
+	if err := b.ensureEOAAllowance(ctx, src, srcTokenAddr, aoriContract, intent.Amount); err != nil {
+		return "", fmt.Errorf("EOA approve aori: %w", err)
+	}
+
+	// Step 3: get Aori quote.
+	quote, err := b.aori.Quote(ctx, &AoriQuoteRequest{
+		Offerer:     relayerEOA.Hex(),
+		Recipient:   dstStealth.Hex(),
+		InputToken:  srcTokenAddr.Hex(),
+		OutputToken: dstTokenAddr.Hex(),
+		InputAmount: intent.Amount.String(),
+		InputChain:  srcChainKey,
+		OutputChain: dstChainKey,
+	})
+	if err != nil {
+		return "", fmt.Errorf("aori quote: %w", err)
+	}
+	log.WithFields(log.Fields{
+		"sessionID":     intent.SessionID,
+		"orderHash":     quote.OrderHash,
+		"outputAmount":  quote.OutputAmount,
+		"estimatedTime": quote.EstimatedTime,
+	}).Info("Privacy bridge (Aori): quote received")
+
+	// Step 4: sign signingHash with relayer EOA's private key.
+	sig, err := signAoriHash(b.eoaPrivKey, quote.SigningHash)
+	if err != nil {
+		return "", fmt.Errorf("sign aori order: %w", err)
+	}
+
+	// Step 5: submit /swap.
+	if err := b.aori.Swap(ctx, quote.OrderHash, sig); err != nil {
+		return "", fmt.Errorf("aori swap: %w", err)
+	}
+	log.WithFields(log.Fields{
+		"sessionID": intent.SessionID,
+		"orderHash": quote.OrderHash,
+	}).Info("Privacy bridge (Aori): order submitted to solver network")
+
+	// Step 6: poll Aori /data/status until terminal state. 5-minute
+	// deadline — Aori quotes today report ~2.5s estimated execution,
+	// so 5 min is a wide safety margin for solver pickup + LZ delivery.
+	deadline := time.Now().Add(5 * time.Minute)
+	poll := time.NewTicker(5 * time.Second)
+	defer poll.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-poll.C:
+			if time.Now().After(deadline) {
+				return "", fmt.Errorf("aori delivery timeout for order %s (5min)", quote.OrderHash)
+			}
+			st, err := b.aori.Status(ctx, quote.OrderHash)
+			if err != nil {
+				log.WithError(err).WithField("orderHash", quote.OrderHash).Debug("aori status poll error, retrying")
+				continue
+			}
+			switch strings.ToLower(st.Status) {
+			case "filled", "settled", "complete", "delivered":
+				log.WithFields(log.Fields{
+					"sessionID":  intent.SessionID,
+					"orderHash":  quote.OrderHash,
+					"fillTxHash": st.FillTxHash,
+				}).Info("Privacy bridge (Aori): order filled")
+				return st.FillTxHash, nil
+			case "expired", "cancelled", "failed":
+				return "", fmt.Errorf("aori order %s terminal state: %s", quote.OrderHash, st.Status)
+			}
+			// Any other status (pending, accepted, etc.) — keep polling.
+		}
+	}
+}
+
+// encodeERC20Transfer builds calldata for ERC20.transfer(to, amount).
+// transfer(address,uint256) selector = 0xa9059cbb.
+func encodeERC20Transfer(to common.Address, amount *big.Int) []byte {
+	data := []byte{0xa9, 0x05, 0x9c, 0xbb}
+	data = append(data, common.LeftPadBytes(to.Bytes(), 32)...)
+	data = append(data, common.LeftPadBytes(amount.Bytes(), 32)...)
+	return data
+}
+
+// ensureEOAAllowance checks the relayer EOA's ERC20 allowance to `spender`
+// on `chainID`. If insufficient for `amount`, submits an EOA approve tx
+// with max-uint256 so future bridges on this chain are no-ops. Idempotent
+// across restarts (reads the live allowance every call).
+func (b *Bridger) ensureEOAAllowance(ctx context.Context, chainID string, token, spender common.Address, amount *big.Int) error {
+	relayerEOA := crypto.PubkeyToAddress(b.eoaPrivKey.PublicKey)
+	current, err := b.allowanceOf(ctx, chainID, token, relayerEOA, spender)
+	if err != nil {
+		return fmt.Errorf("read EOA allowance: %w", err)
+	}
+	if current.Cmp(amount) >= 0 {
+		return nil
+	}
+	maxApprove := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+	// approve(address,uint256) selector = 0x095ea7b3
+	data := []byte{0x09, 0x5e, 0xa7, 0xb3}
+	data = append(data, common.LeftPadBytes(spender.Bytes(), 32)...)
+	data = append(data, common.LeftPadBytes(maxApprove.Bytes(), 32)...)
+
+	tx, _, err := b.sendEOATx(ctx, chainID, token, big.NewInt(0), data, 100_000, 2*time.Minute)
+	if err != nil {
+		return fmt.Errorf("EOA approve tx: %w", err)
+	}
+	log.WithFields(log.Fields{
+		"chain":   chainID,
+		"token":   token.Hex(),
+		"spender": spender.Hex(),
+		"txHash":  tx.Hash().Hex(),
+	}).Info("Privacy bridge (Aori): EOA approve submitted (max-uint, one-time per chain)")
+	return nil
+}
+
+// sendEOATx submits an EIP-1559 tx from the relayer EOA on chainID and
+// waits for inclusion. Used for one-time approves of the Aori contract
+// (the Safe path covers everything else). Reuses the per-chain
+// blockchain.Client only for its ethclient.Client — signing is local.
+func (b *Bridger) sendEOATx(ctx context.Context, chainID string, to common.Address, value *big.Int, data []byte, gasLimit uint64, timeout time.Duration) (*types.Transaction, *types.Receipt, error) {
+	c, ok := b.clients[chainID]
+	if !ok {
+		return nil, nil, fmt.Errorf("no client for chain %s", chainID)
+	}
+	eth := c.EthClient()
+	from := crypto.PubkeyToAddress(b.eoaPrivKey.PublicKey)
+	cidBig, _ := new(big.Int).SetString(chainID, 10)
+
+	nonce, err := eth.PendingNonceAt(ctx, from)
+	if err != nil {
+		return nil, nil, fmt.Errorf("nonce: %w", err)
+	}
+	tip, err := eth.SuggestGasTipCap(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("tip cap: %w", err)
+	}
+	head, err := eth.HeaderByNumber(ctx, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("head: %w", err)
+	}
+	feeCap := new(big.Int).Add(new(big.Int).Mul(head.BaseFee, big.NewInt(2)), tip)
+
+	if gasLimit == 0 {
+		msg := ethereum.CallMsg{From: from, To: &to, Value: value, Data: data}
+		est, err := eth.EstimateGas(ctx, msg)
+		if err != nil {
+			return nil, nil, fmt.Errorf("estimate gas: %w", err)
+		}
+		gasLimit = est * 12 / 10
+	}
+
+	tx := types.NewTx(&types.DynamicFeeTx{
+		ChainID:   cidBig,
+		Nonce:     nonce,
+		GasTipCap: tip,
+		GasFeeCap: feeCap,
+		Gas:       gasLimit,
+		To:        &to,
+		Value:     value,
+		Data:      data,
+	})
+	signed, err := types.SignTx(tx, types.LatestSignerForChainID(cidBig), b.eoaPrivKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("sign: %w", err)
+	}
+	if err := eth.SendTransaction(ctx, signed); err != nil {
+		return nil, nil, fmt.Errorf("send: %w", err)
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	rcpt, err := bind.WaitMined(waitCtx, eth, signed)
+	if err != nil {
+		return signed, nil, fmt.Errorf("wait mined %s: %w", signed.Hash().Hex(), err)
+	}
+	if rcpt.Status != 1 {
+		return signed, rcpt, fmt.Errorf("EOA tx %s reverted", signed.Hash().Hex())
+	}
+	return signed, rcpt, nil
 }
 
 // loadSafeSignerKeys mirrors the relayer/solver pattern: read up to

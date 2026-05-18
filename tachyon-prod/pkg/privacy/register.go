@@ -34,11 +34,15 @@ func RegisterWithRelayer(cfg *Config) error {
 
 	lifiRoutes := LifiSupportedRoutes()
 	stargateRoutes := StargateSupportedRoutes()
+	aoriRoutes := AoriSupportedRoutes()
 	if err := postRegistration(cfg, string(SolverTypeLifiXTach), addr, routesToTypes(lifiRoutes), tokensForRoutes(lifiRoutes)); err != nil {
 		return fmt.Errorf("lifiXtach register: %w", err)
 	}
 	if err := postRegistration(cfg, string(SolverTypeStargateXTach), addr, routesToTypes(stargateRoutes), tokensForRoutes(stargateRoutes)); err != nil {
 		return fmt.Errorf("stargateXtach register: %w", err)
+	}
+	if err := postRegistration(cfg, string(SolverTypeAoriXTach), addr, routesToTypes(aoriRoutes), tokensForRoutes(aoriRoutes)); err != nil {
+		return fmt.Errorf("aoriXtach register: %w", err)
 	}
 	return nil
 }

@@ -264,16 +264,20 @@ func IsStargateRoute(src, dst string, srcTok, dstTok Token) bool {
 }
 
 // IsLifiRoute reports whether the route should be dispatched via LI.FI.
-// Anything that's NOT a Stargate route and has known tokens on both sides
-// falls through to LI.FI. Previously this required one side to be
-// MegaETH; that gate was lifted to let the privacy router serve the
-// full L2 mesh (Base ↔ Eth ↔ Arb ↔ Op) for same-asset USDC, which
-// LI.FI quotes atomically via Across solver-fills with no destination
-// signature required — preserving the stealth-Safe atomic-delivery
-// privacy property. Routes that don't have a viable LI.FI path simply
-// fail at quote time and the intent transitions to failed gracefully.
+// Falls through to LI.FI for anything that isn't a Stargate or Aori
+// route and has known tokens on both sides. Previously this required
+// one side to be MegaETH; that gate was lifted to let the privacy
+// router serve the full L2 mesh (Base ↔ Eth ↔ Arb ↔ Op) for same-asset
+// USDC, which LI.FI quotes atomically via Across solver-fills with no
+// destination signature required — preserving the stealth-Safe atomic-
+// delivery privacy property. Routes that don't have a viable LI.FI
+// path simply fail at quote time and the intent transitions to failed
+// gracefully.
 func IsLifiRoute(src, dst string, srcTok, dstTok Token) bool {
 	if IsStargateRoute(src, dst, srcTok, dstTok) {
+		return false
+	}
+	if IsAoriRoute(src, dst, srcTok, dstTok) {
 		return false
 	}
 	// ETH-source intents can't be detected by the deposit watcher
@@ -286,6 +290,30 @@ func IsLifiRoute(src, dst string, srcTok, dstTok Token) bool {
 	}
 	return TokenAddress(src, srcTok) != (common.Address{}) &&
 		TokenAddress(dst, dstTok) != (common.Address{})
+}
+
+// IsAoriRoute matches the 4 USDC@{Base,Eth,Arb,Op} → USDM@MegaETH
+// corridors. Aori's solver network has pre-positioned USDM inventory
+// on MegaETH and fills these orders atomically (no destination-side
+// swap, no destination-side signature). Aori's settlement contract
+// verifies offerer signatures via ecrecover only (no EIP-1271), so
+// the offerer must be an EOA — we use the static relayer EOA. The
+// stealth-Safe recipient is preserved (Aori delivers there atomically),
+// but the EOA becomes a public correlator for these 4 corridors. See
+// the SolverTypeAoriXTach comment and sendAori in bridge.go for the
+// full privacy analysis.
+func IsAoriRoute(src, dst string, srcTok, dstTok Token) bool {
+	if dst != ChainIDMegaETH {
+		return false
+	}
+	if srcTok != TokenUSDC || dstTok != TokenUSDM {
+		return false
+	}
+	switch src {
+	case ChainIDBase, ChainIDEthereum, ChainIDArbitrum, ChainIDOptimism:
+		return true
+	}
+	return false
 }
 
 // IsNativeToken returns true iff t is ETH (or any other native gas
@@ -366,7 +394,9 @@ func IsSupportedRoute(src, dst string, srcTok, dstTok Token) bool {
 	if src == dst {
 		return false
 	}
-	return IsLifiRoute(src, dst, srcTok, dstTok) || IsStargateRoute(src, dst, srcTok, dstTok)
+	return IsLifiRoute(src, dst, srcTok, dstTok) ||
+		IsStargateRoute(src, dst, srcTok, dstTok) ||
+		IsAoriRoute(src, dst, srcTok, dstTok)
 }
 
 // SolverType is the registration label this service publishes when
@@ -378,6 +408,7 @@ const (
 	SolverTypeTachyon       SolverType = "tachyon"       // existing solver (Base ↔ Horizen, intent-auction)
 	SolverTypeLifiXTach     SolverType = "lifiXtach"     // privacy router, LI.FI-routed legs
 	SolverTypeStargateXTach SolverType = "stargateXtach" // privacy router, Stargate-routed legs
+	SolverTypeAoriXTach     SolverType = "aoriXtach"     // privacy router, Aori-routed legs (USDC→USDM@MegaETH; degraded privacy: relayer EOA is the offerer)
 )
 
 // LifiSupportedRoutes lists every (src, srcTok, dst, dstTok) tuple the
@@ -460,6 +491,20 @@ func StargateSupportedRoutes() []RouteSpec {
 	}
 	out = append(out, RouteSpec{ChainIDBase, TokenZEN, ChainIDHorizen, TokenZEN})
 	out = append(out, RouteSpec{ChainIDHorizen, TokenZEN, ChainIDBase, TokenZEN})
+	return out
+}
+
+// AoriSupportedRoutes returns the 4 USDC@{Base,Eth,Arb,Op} → USDM@MegaETH
+// corridors served via Aori's solver network. These are advertised
+// under SolverTypeAoriXTach so the FE can label them differently from
+// the higher-privacy lifiXtach/stargateXtach routes (recipient is still
+// the stealth Safe, but the relayer EOA is publicly identifiable as
+// the source-side offerer).
+func AoriSupportedRoutes() []RouteSpec {
+	out := []RouteSpec{}
+	for _, src := range []string{ChainIDBase, ChainIDEthereum, ChainIDArbitrum, ChainIDOptimism} {
+		out = append(out, RouteSpec{src, TokenUSDC, ChainIDMegaETH, TokenUSDM})
+	}
 	return out
 }
 
