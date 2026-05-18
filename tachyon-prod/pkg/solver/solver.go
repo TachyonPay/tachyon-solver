@@ -1776,6 +1776,7 @@ var coinGeckoIDs = map[string]string{
 	"WETH": "weth",
 	"ETH":  "ethereum",
 	"ZEN":  "zencash",
+	"USDM": "megausd", // MegaETH's USDm stable; CoinGecko slug confirmed 2026-05-18
 }
 
 var coinCapIDs = map[string]string{

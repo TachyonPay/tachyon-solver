@@ -143,7 +143,11 @@ func (p *Processor) watchDeposits(ctx context.Context, chainID string) {
 	cc := p.cfg.Chains[chainID]
 	client := p.clients[chainID]
 
-	ticker := time.NewTicker(8 * time.Second)
+	// 15s ≫ 8s on deposit-detection has no UX impact: downstream bridges take
+	// 30-60s to deliver, so latency on the detection leg is invisible to the
+	// end-to-end flow. Bumping from 8s to 15s cuts deposit-watcher RPC volume
+	// by ~47% (90 → 48 eth_blockNumber+eth_getLogs calls/min across 6 chains).
+	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
 	for {

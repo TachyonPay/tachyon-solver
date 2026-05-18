@@ -264,14 +264,16 @@ func IsStargateRoute(src, dst string, srcTok, dstTok Token) bool {
 }
 
 // IsLifiRoute reports whether the route should be dispatched via LI.FI.
-// Anything that's NOT a Stargate route falls through to LI.FI; the
-// MegaETH ↔ {Base, Eth, Arb, Opt} matrix is verified live, other tuples
-// will simply fail at quote time and the intent transitions to failed.
+// Anything that's NOT a Stargate route and has known tokens on both sides
+// falls through to LI.FI. Previously this required one side to be
+// MegaETH; that gate was lifted to let the privacy router serve the
+// full L2 mesh (Base ↔ Eth ↔ Arb ↔ Op) for same-asset USDC, which
+// LI.FI quotes atomically via Across solver-fills with no destination
+// signature required — preserving the stealth-Safe atomic-delivery
+// privacy property. Routes that don't have a viable LI.FI path simply
+// fail at quote time and the intent transitions to failed gracefully.
 func IsLifiRoute(src, dst string, srcTok, dstTok Token) bool {
 	if IsStargateRoute(src, dst, srcTok, dstTok) {
-		return false
-	}
-	if src != ChainIDMegaETH && dst != ChainIDMegaETH {
 		return false
 	}
 	// ETH-source intents can't be detected by the deposit watcher
@@ -399,16 +401,48 @@ func LifiSupportedRoutes() []RouteSpec {
 	for _, ch := range []string{ChainIDBase, ChainIDArbitrum, ChainIDOptimism} {
 		out = append(out, RouteSpec{ChainIDMegaETH, TokenUSDT0, ch, TokenETH})
 	}
-	// USDm (MegaUSD) — verified live on li.quest 2026-05-12. Same MegaETH-
-	// bridge pattern as USDT0 but a different stable; bigger market cap
-	// ($341M vs USDT0). Inbound from USDC@{Base,Eth,Arb,Opt}, outbound back
-	// to USDC on the same set, plus same-asset Eth↔MegaETH.
+	// USDm (MegaUSD, $341M mcap). Glacis is the only bridge with a USDM
+	// OFT deployment, and it lives only on Ethereum ↔ MegaETH. So the
+	// viable surface from our stealth-Safe model (where the bridge must
+	// deliver atomically to toAddress) is:
+	//
+	//   - same-asset USDM Eth ↔ MegaETH (Glacis)
+	//   - outbound USDM@MegaETH → USDC@{Base,Eth,Arb,Opt}: works because
+	//     LI.FI composes a source-side swap on MegaETH (USDM→intermediate)
+	//     then Across delivers the intermediate to USDC@dst atomically.
+	//     The destination-side leg is a token transfer to the stealth
+	//     Safe — no destination signature needed.
+	//
+	// Intentionally NOT registered: USDC@{Base,Eth,Arb,Opt} → USDM@MegaETH.
+	// LI.FI does produce multistep quotes for these (bridge to ETH/USDT0,
+	// then swap to USDM on MegaETH), but the destination-side swap step
+	// requires a signature on MegaETH that our undeployed stealth Safe
+	// can't provide — and routing through TEE Safe to sign instead would
+	// publicly link source deposit and destination delivery via the TEE
+	// Safe's address. The only way to serve those four corridors with the
+	// privacy guarantee intact is to pre-position USDM inventory on
+	// MegaETH and promote them to tachyon routes (operator-filled
+	// atomically from inventory, same model as Base↔Horizen).
 	for _, ch := range []string{ChainIDBase, ChainIDEthereum, ChainIDArbitrum, ChainIDOptimism} {
-		out = append(out, RouteSpec{ch, TokenUSDC, ChainIDMegaETH, TokenUSDM})
 		out = append(out, RouteSpec{ChainIDMegaETH, TokenUSDM, ch, TokenUSDC})
 	}
 	out = append(out, RouteSpec{ChainIDEthereum, TokenUSDM, ChainIDMegaETH, TokenUSDM})
 	out = append(out, RouteSpec{ChainIDMegaETH, TokenUSDM, ChainIDEthereum, TokenUSDM})
+
+	// Intra-L2 same-asset USDC mesh: Base ↔ Eth ↔ Arb ↔ Opt. LI.FI quotes
+	// these atomically via Across (USDC is canonical on all four; solver
+	// inventory exists on every pair). Stealth Safe receives USDC directly,
+	// no destination-side signature required. Adds 12 routes (4 chains × 3
+	// peers × 2 directions / 2 = 6 unordered pairs × 2 = 12 ordered).
+	intraChains := []string{ChainIDBase, ChainIDEthereum, ChainIDArbitrum, ChainIDOptimism}
+	for _, src := range intraChains {
+		for _, dst := range intraChains {
+			if src == dst {
+				continue
+			}
+			out = append(out, RouteSpec{src, TokenUSDC, dst, TokenUSDC})
+		}
+	}
 	return out
 }
 
