@@ -141,20 +141,29 @@ func (c *AoriClient) Swap(ctx context.Context, orderHash string, sig []byte) err
 	return nil
 }
 
-// AoriStatus is the subset of /data/status we read. The `status` field
-// is a free-form string; we treat "filled" / "settled" / "complete" /
-// "delivered" as success and "expired" / "cancelled" / "failed" as
-// terminal failure. Anything else is treated as "still pending".
+// AoriStatus is the subset of /data/query we read for a single order.
+// Aori's /data/query returns {orders: [order, ...], pagination: ...} —
+// we extract the one matching our orderHash. The `status` field is a
+// free-form string; we treat "completed" / "filled" / "settled" /
+// "complete" / "delivered" as success and "expired" / "cancelled" /
+// "failed" as terminal failure. Anything else is "still pending".
 type AoriStatus struct {
-	OrderHash  string `json:"orderHash"`
-	Status     string `json:"status"`
-	FillTxHash string `json:"fillTxHash,omitempty"`
+	OrderHash string `json:"orderHash"`
+	Status    string `json:"status"`
+	SrcTx     string `json:"srcTx,omitempty"`
+	DstTx     string `json:"dstTx,omitempty"`
 }
 
-// Status polls /data/status. Used in a loop between /swap submission
-// and on-chain delivery confirmation.
+// aoriQueryResponse is the wrapping shape /data/query returns.
+type aoriQueryResponse struct {
+	Orders []AoriStatus `json:"orders"`
+}
+
+// Status polls /data/query (the canonical lookup endpoint, despite the
+// docs page being called "status"). Returns the matching order or an
+// empty AoriStatus if the order isn't indexed yet.
 func (c *AoriClient) Status(ctx context.Context, orderHash string) (*AoriStatus, error) {
-	url := c.baseURL + "/data/status?orderHash=" + orderHash
+	url := c.baseURL + "/data/query?orderHash=" + orderHash
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -163,18 +172,23 @@ func (c *AoriClient) Status(ctx context.Context, orderHash string) (*AoriStatus,
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("aori /data/status: %w", err)
+		return nil, fmt.Errorf("aori /data/query: %w", err)
 	}
 	defer resp.Body.Close()
 	rb, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("aori /data/status %d: %s", resp.StatusCode, strings.TrimSpace(string(rb)))
+		return nil, fmt.Errorf("aori /data/query %d: %s", resp.StatusCode, strings.TrimSpace(string(rb)))
 	}
-	var s AoriStatus
-	if err := json.Unmarshal(rb, &s); err != nil {
-		return nil, fmt.Errorf("aori /data/status decode: %w", err)
+	var wrapped aoriQueryResponse
+	if err := json.Unmarshal(rb, &wrapped); err != nil {
+		return nil, fmt.Errorf("aori /data/query decode: %w", err)
 	}
-	return &s, nil
+	if len(wrapped.Orders) == 0 {
+		// Order not indexed yet — return an empty status so callers
+		// keep polling.
+		return &AoriStatus{OrderHash: orderHash}, nil
+	}
+	return &wrapped.Orders[0], nil
 }
 
 // AoriChainKey maps a numeric chain ID to the string key Aori uses in

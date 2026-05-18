@@ -654,9 +654,9 @@ func (b *Bridger) sendAori(ctx context.Context, intent *BridgeIntent) (string, e
 				log.WithFields(log.Fields{
 					"sessionID":  intent.SessionID,
 					"orderHash":  quote.OrderHash,
-					"fillTxHash": st.FillTxHash,
+					"fillTxHash": st.DstTx,
 				}).Info("Privacy bridge (Aori): order filled")
-				return st.FillTxHash, nil
+				return st.DstTx, nil
 			case "expired", "cancelled", "failed":
 				return "", fmt.Errorf("aori order %s terminal state: %s", quote.OrderHash, st.Status)
 			}
