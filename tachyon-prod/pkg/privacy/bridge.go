@@ -650,7 +650,7 @@ func (b *Bridger) sendAori(ctx context.Context, intent *BridgeIntent) (string, e
 				continue
 			}
 			switch strings.ToLower(st.Status) {
-			case "filled", "settled", "complete", "delivered":
+			case "completed", "filled", "settled", "complete", "delivered":
 				log.WithFields(log.Fields{
 					"sessionID":  intent.SessionID,
 					"orderHash":  quote.OrderHash,
