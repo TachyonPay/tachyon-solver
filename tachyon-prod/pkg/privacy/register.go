@@ -43,15 +43,37 @@ func RegisterWithRelayer(cfg *Config) error {
 	return nil
 }
 
-// representativeSafe returns the first configured chain's TEE Safe so
-// the relayer has a stable string to key on. Iteration over a Go map
-// is randomized but the relayer doesn't care which we pick — only that
-// it stays the same across the two registrations in this single call.
+// representativeSafe returns a single TEE Safe address that the relayer
+// uses as the registration key for this privacy router. The pick must be
+// deterministic across restarts — otherwise Go's randomized map iteration
+// picks a different "first" chain on every boot, and each new boot creates
+// a duplicate (type, address) row in the relayer's solver index. The old
+// rows never get cleaned up and FE consumers end up seeing stale catalogs
+// from past restarts unless they filter by lastSeen.
+//
+// Priority order (first match wins):
+//   1. MegaETH   — the cross-chain Safe address is shared across MegaETH,
+//                  Eth, Arb, Op so this is the most-likely-stable pick.
+//   2. Base      — fallback when MegaETH isn't configured.
+//   3. Horizen   — fallback.
+//   4. Anything  — sorted by chainID for full determinism.
 func representativeSafe(cfg *Config) string {
-	for _, ch := range cfg.Chains {
-		zero := [20]byte{}
-		if ch.TEESafe != zero {
+	zero := [20]byte{}
+	// Preferred order — pick the cross-chain Safe deployment first.
+	for _, preferred := range []string{ChainIDMegaETH, ChainIDBase, ChainIDHorizen} {
+		if ch, ok := cfg.Chains[preferred]; ok && ch.TEESafe != zero {
 			return ch.TEESafe.Hex()
+		}
+	}
+	// Deterministic fallback: sorted chain IDs.
+	keys := make([]string, 0, len(cfg.Chains))
+	for k := range cfg.Chains {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if cfg.Chains[k].TEESafe != zero {
+			return cfg.Chains[k].TEESafe.Hex()
 		}
 	}
 	return ""

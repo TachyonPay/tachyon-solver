@@ -890,15 +890,36 @@ func (r *Relayer) checkTokenBalance(chainName, solverAddress, tokenAddress strin
 	}, nil
 }
 
+// solverStaleTTL is the maximum age of a solver registration that
+// GetRoutes will surface in the response. Anything older than this is
+// treated as stale and filtered out. Registrations accumulate in the
+// store as services restart (each boot may pick a slightly different
+// representative address); without this filter, FE consumers see old
+// catalogs from past restarts unless they themselves filter by lastSeen.
+//
+// 7 days is a safety margin: production privacy-router / solver instances
+// refresh on every restart, which happens at least weekly. If we have a
+// solver that genuinely hasn't checked in for a week, it's most likely
+// dead and shouldn't be advertised to users.
+const solverStaleTTL = 7 * 24 * time.Hour
+
 func (r *Relayer) GetRoutes(filter *types.GetRoutesRequest) *types.GetRoutesResponse {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	uniqueRoutes := make(map[string]types.Route)
 	solversWithRoutes := []types.SolverInfo{}
+	cutoff := time.Now().Add(-solverStaleTTL)
 
 	for _, solverInfo := range r.registeredSolvers {
 		if !solverTypeMatches(filter.Type, solverInfo.Type) {
+			continue
+		}
+		// Skip registrations that haven't refreshed within the TTL.
+		// Privacy-router and solver both re-register on boot, so a stale
+		// LastSeen means that registration's catalog is from a past
+		// version of the service and should not surface.
+		if !solverInfo.LastSeen.IsZero() && solverInfo.LastSeen.Before(cutoff) {
 			continue
 		}
 
