@@ -28,6 +28,7 @@ var (
 	DeriveStealthKeyTypeHash    = crypto.Keccak256Hash([]byte("DeriveStealthKey(address recipientAddress,address stealthAddress)"))
 	DeploySafeTypeHash          = crypto.Keccak256Hash([]byte("DeploySafe(address stealthAddress,uint256 chainId)"))
 	AuthSessionTypeHash         = crypto.Keccak256Hash([]byte("AuthSession(uint256 timestamp)"))
+	LuckyDrawEntryTypeHash      = crypto.Keccak256Hash([]byte("LuckyDrawEntry(address proxyAddress,uint256 chainId)"))
 )
 
 func init() {
@@ -144,6 +145,50 @@ func hashAuthSession(timestamp *big.Int) common.Hash {
 		AuthSessionTypeHash.Bytes(),
 		common.LeftPadBytes(timestamp.Bytes(), 32),
 	)
+}
+
+// hashLuckyDrawEntry builds the EIP-712 struct hash for LuckyDrawEntry.
+func hashLuckyDrawEntry(proxyAddress common.Address, chainId *big.Int) common.Hash {
+	return crypto.Keccak256Hash(
+		LuckyDrawEntryTypeHash.Bytes(),
+		common.LeftPadBytes(proxyAddress.Bytes(), 32),
+		common.LeftPadBytes(chainId.Bytes(), 32),
+	)
+}
+
+// LuckyDrawEntryDigest returns the EIP-712 digest a client must sign for a lucky draw entry.
+// Exposed so frontend tooling and tests can construct the digest without calling RecoverLuckyDrawEntry.
+func LuckyDrawEntryDigest(proxyAddress common.Address, chainId *big.Int) common.Hash {
+	return hashTypedData(hashLuckyDrawEntry(proxyAddress, chainId))
+}
+
+// SignLuckyDrawEntry signs a LuckyDrawEntry EIP-712 message with the given private key.
+// Returns a 65-byte signature with v=0/1 (NOT 27/28 — callers must adjust if needed for MetaMask).
+func SignLuckyDrawEntry(key *ecdsa.PrivateKey, proxyAddress common.Address, chainId *big.Int) ([]byte, error) {
+	digest := hashTypedData(hashLuckyDrawEntry(proxyAddress, chainId))
+	return crypto.Sign(digest.Bytes(), key)
+}
+
+// RecoverLuckyDrawEntry recovers the signer from an EIP-712 LuckyDrawEntry signature.
+// The client signs LuckyDrawEntry(address proxyAddress, uint256 chainId) under
+// the TachyonStealth v1 domain using signTypedData (EIP-712).
+func RecoverLuckyDrawEntry(signature []byte, proxyAddress common.Address, chainId *big.Int) (common.Address, error) {
+	digest := hashTypedData(hashLuckyDrawEntry(proxyAddress, chainId))
+
+	if len(signature) != 65 {
+		return common.Address{}, fmt.Errorf("invalid signature length: %d", len(signature))
+	}
+	sigCopy := make([]byte, 65)
+	copy(sigCopy, signature)
+	if sigCopy[64] >= 27 {
+		sigCopy[64] -= 27
+	}
+
+	pubKey, err := crypto.SigToPub(digest.Bytes(), sigCopy)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("could not recover signer: %w", err)
+	}
+	return crypto.PubkeyToAddress(*pubKey), nil
 }
 
 // RecoverAuthSession recovers the signer address from an EIP-712 AuthSession signature.
